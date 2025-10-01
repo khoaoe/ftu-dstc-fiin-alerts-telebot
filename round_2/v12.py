@@ -23,6 +23,21 @@ warnings.filterwarnings('ignore', category=UserWarning)
 
 print("Các thư viện đã được nạp thành công.")
 
+
+# ==== ENV for data path (insert near top of round_2/v12.py) ====
+import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+DATA_FILE_PATH = os.getenv("DATA_FILE_PATH", "").strip()
+if not DATA_FILE_PATH:
+    # Không bắt buộc khi chạy qua FiinQuantX; chỉ cảnh báo nếu bạn chạy backtest trực tiếp
+    print("[v12] NOTE: DATA_FILE_PATH is empty; skip local backtest IO unless provided.")
+# ==============================================================
+
 """# 2. Logic định lượng và backtest
 
 ## Hàm tính metrics
@@ -1808,3 +1823,189 @@ else:
     print(f"Monte Carlo: 95th Percentile Drawdown = {np.percentile(sim_drawdowns, 95):.2%}")
 
 print("Backtest V9 hoàn tất. Logs đã lưu!")
+
+# ==== REAL backtest entrypoint (paste at bottom of round_2/v12.py) ====
+def _main_backtest():
+    """
+    Backtest thực tế cho chiến lược V12:
+    - Đọc DATA_FILE_PATH từ .env (csv hoặc parquet)
+    - Bảo đảm cột 'time' (datetime), 'ticker' (uppercase)
+    - Gắn các biến thị trường 'market_*' (close/MA50/MA200/RSI/ADX/Bollinger width) từ VNINDEX
+    - Tính toàn bộ feature qua precompute_technical_indicators_vectorized(...)
+    - Chạy backtest_engine_v12(...) với screener apply_enhanced_screener_v12
+    - Lưu kết quả (history, trades, metrics) vào OUTPUT_DIR
+    """
+    import os
+    from pathlib import Path
+    import pandas as pd
+    import numpy as np
+
+    # ---- 1) ENV ----
+    from dotenv import load_dotenv
+    load_dotenv()
+    DATA_FILE_PATH = os.getenv("DATA_FILE_PATH", "").strip()
+    assert DATA_FILE_PATH, "DATA_FILE_PATH chưa được set trong .env"
+
+    BACKTEST_START = os.getenv("BACKTEST_START", "").strip()
+    BACKTEST_END   = os.getenv("BACKTEST_END", "").strip()
+    INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "100000000"))
+    BASE_CAPITAL    = float(os.getenv("BASE_CAPITAL", "100000000"))
+    OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "outputs")).resolve()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # ---- 2) LOAD DATA ----
+    path = Path(DATA_FILE_PATH)
+    if not path.exists():
+        raise FileNotFoundError(f"Không thấy file dữ liệu: {path}")
+
+    # tự đoán định dạng
+    ext = path.suffix.lower()
+    if ext == ".parquet":
+        df = pd.read_parquet(path)
+    elif ext == ".csv":
+        df = pd.read_csv(path)
+    else:
+        # thử parquet rồi csv
+        try:
+            df = pd.read_parquet(path)
+        except Exception:
+            df = pd.read_csv(path)
+
+    # Chuẩn hoá cột thời gian
+    if "time" not in df.columns:
+        if "timestamp" in df.columns:
+            df = df.rename(columns={"timestamp": "time"})
+        else:
+            raise KeyError("Thiếu cột thời gian: cần 'time' hoặc 'timestamp'.")
+
+    df["time"] = pd.to_datetime(df["time"])
+    # Đảm bảo cột bắt buộc
+    base_required = ["ticker", "open", "high", "low", "close", "volume"]
+    miss = [c for c in base_required if c not in df.columns]
+    if miss:
+        raise KeyError(f"Thiếu cột bắt buộc: {miss}")
+
+    # Một số cột dòng tiền (nếu không có thì tạo 0 để tránh lỗi downstream)
+    for c in ["bu", "sd", "fb", "fs", "fn"]:
+        if c not in df.columns:
+            df[c] = 0.0
+
+    df["ticker"] = df["ticker"].astype(str).str.upper()
+    df = df.sort_values(["time", "ticker"]).reset_index(drop=True)
+
+    # ---- 3) ATTACH MARKET FEATURES (market_*) từ VNINDEX ----
+    vn = df[df["ticker"] == "VNINDEX"].copy()
+    if vn.empty:
+        raise ValueError("Dataset không có VNINDEX để suy ra biến 'market_*'.")
+
+    vn = vn.sort_values("time")
+    # Close/High/Low của thị trường
+    m_close = vn[["time", "close"]].rename(columns={"close": "market_close"})
+    m_high  = vn[["time", "high"]].rename(columns={"high": "market_high"})
+    m_low   = vn[["time", "low"]].rename(columns={"low": "market_low"})
+
+    m = m_close.merge(m_high, on="time", how="left").merge(m_low, on="time", how="left").set_index("time")
+
+    # MA50 / MA200 của thị trường
+    m["market_MA50"]  = m["market_close"].rolling(50, min_periods=50).mean()
+    m["market_MA200"] = m["market_close"].rolling(200, min_periods=200).mean()
+
+    # RSI 14 cho thị trường
+    def _rsi(series, n=14):
+        delta = series.diff()
+        up = delta.clip(lower=0)
+        down = -delta.clip(upper=0)
+        ma_up = up.rolling(n, min_periods=n).mean()
+        ma_down = down.rolling(n, min_periods=n).mean()
+        rs = ma_up / (ma_down + 1e-12)
+        return 100 - (100 / (1 + rs))
+
+    m["market_rsi"] = _rsi(m["market_close"], 14)
+
+    # Bollinger width (20, 2σ)
+    ma20 = m["market_close"].rolling(20, min_periods=20).mean()
+    sd20 = m["market_close"].rolling(20, min_periods=20).std()
+    upper = ma20 + 2 * sd20
+    lower = ma20 - 2 * sd20
+    m["market_boll_width"] = (upper - lower) / (ma20.replace(0, np.nan))
+
+    # ADX 14 cho thị trường (dùng hàm đã định nghĩa trong file)
+    try:
+        _mdf = m[["market_high", "market_low", "market_close"]].rename(
+            columns={"market_high": "high", "market_low": "low", "market_close": "close"}
+        )
+        m["market_adx"] = calculate_adx(_mdf, n=14)
+    except Exception:
+        # nếu có vấn đề, fallback ADX ~ 25
+        m["market_adx"] = 25.0
+
+    market_feats = m.reset_index()
+
+    # Gắn vào toàn bộ khung dữ liệu theo 'time'
+    df = df.merge(market_feats, on="time", how="left")
+
+    # ---- 4) TÍNH FEATURE CHO TOÀN LỊCH SỬ (V12) ----
+    # LƯU Ý: đã có đầy đủ market_* nên precompute sẽ không chạy nhánh groupby(level=0)
+    feat = precompute_technical_indicators_vectorized(df)
+
+    # ---- 5) THỜI GIAN BACKTEST ----
+    tmin = pd.to_datetime(feat["time"].min()).date()
+    tmax = pd.to_datetime(feat["time"].max()).date()
+    start_str = BACKTEST_START if BACKTEST_START else str(tmin)
+    end_str   = BACKTEST_END   if BACKTEST_END   else str(tmax)
+
+    # ---- 6) CHẠY BACKTEST ----
+    print(f"[V12] Backtest từ {start_str} → {end_str} | vốn đầu: {INITIAL_CAPITAL:,.0f} | base: {BASE_CAPITAL:,.0f}")
+    df_hist, metrics, trades = backtest_engine_v12(
+        feat,
+        apply_enhanced_screener_v12,
+        start_str,
+        end_str,
+        INITIAL_CAPITAL,
+        BASE_CAPITAL,
+        # giữ nguyên các tham số mặc định trong hàm (commission, lot_size, risk, v.v.)
+    )
+
+    # ---- 7) LƯU KẾT QUẢ ----
+    hist_path   = OUTPUT_DIR / "backtest_history.parquet"
+    trades_path = OUTPUT_DIR / "trades.csv"
+    metrics_path= OUTPUT_DIR / "metrics.json"
+
+    try:
+        df_hist.to_parquet(hist_path)
+    except Exception:
+        df_hist.reset_index(drop=False).to_csv(OUTPUT_DIR / "backtest_history.csv", index=False)
+
+    import json
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
+
+    # trades có thể là list dict; chuẩn hoá rồi lưu
+    if isinstance(trades, list) and trades and isinstance(trades[0], dict):
+        pd.DataFrame(trades).to_csv(trades_path, index=False)
+    elif isinstance(trades, pd.DataFrame):
+        trades.to_csv(trades_path, index=False)
+
+    # In tóm tắt
+    print("\n[V12] KẾT QUẢ BACKTEST (tóm tắt)")
+    try:
+        for k, v in metrics.items():
+            if isinstance(v, float):
+                print(f"- {k}: {v:,.4f}")
+            else:
+                print(f"- {k}: {v}")
+    except Exception:
+        pass
+
+    # Gợi ý picks cho phiên cuối cùng (tiện kiểm tra logic screener)
+    last_day = feat["time"].max()
+    today_df = feat[feat["time"] == last_day].copy()
+    picks = apply_enhanced_screener_v12(today_df) or []
+    print(f"\n[V12] Picks phiên cuối cùng ({pd.to_datetime(last_day).date()}): {', '.join(picks) if picks else '—'}")
+
+    print(f"\nĐã lưu:\n- {hist_path}\n- {trades_path}\n- {metrics_path}")
+
+# Chạy khi gọi trực tiếp file v12.py
+if __name__ == "__main__":
+    _main_backtest()
+

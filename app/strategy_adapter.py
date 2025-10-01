@@ -1,6 +1,14 @@
-# Thin re-export so other modules can import from a stable path
+# app/strategy_adapter.py
 from strategies.v12_adapter import (
-    compute_picks_from_daily_df,
+    compute_features_v12,
+    apply_v12_on_last_day,
+    compute_picks_from_history,
     early_signal_from_15m_bar,
 )
-__all__ = ["compute_picks_from_daily_df", "early_signal_from_15m_bar"]
+
+__all__ = [
+    "compute_features_v12",
+    "apply_v12_on_last_day",
+    "compute_picks_from_history",
+    "early_signal_from_15m_bar",
+]

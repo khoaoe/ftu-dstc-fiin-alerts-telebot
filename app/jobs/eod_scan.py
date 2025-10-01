@@ -1,7 +1,8 @@
+# app/jobs/eod_scan.py
 from ..fiin_client import get_client
 from ..config import CFG
 from ..notifier import TelegramNotifier
-from ..strategy_adapter import compute_picks_from_daily_df
+from ..strategy_adapter import compute_picks_from_history
 
 def run_eod_scan():
     client = get_client()
@@ -14,9 +15,8 @@ def run_eod_scan():
         period=260
     ).get_data()
 
-    last_ts = data["timestamp"].max()
-    df_last = data[data["timestamp"] == last_ts].copy()
+    # DÙNG CHUẨN V12: tính feature trên toàn lịch sử, rồi áp filter last-day
+    picks = compute_picks_from_history(data)
 
-    picks = compute_picks_from_daily_df(df_last)
     tg = TelegramNotifier()
     tg.send("<b>[EOD] V12 picks</b>: " + ", ".join(picks) if picks else "<b>[EOD]</b> Không có mã đạt filter hôm nay.")
