@@ -10,3 +10,4 @@
 .github/copilot-instructions.md
 AGENTS.md
 /.venv
+.env
