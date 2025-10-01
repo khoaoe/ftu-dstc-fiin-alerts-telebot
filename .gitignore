@@ -11,4 +11,6 @@
 AGENTS.md
 /.venv
 .env
+*.txt
+*.txt
 repo.txt
