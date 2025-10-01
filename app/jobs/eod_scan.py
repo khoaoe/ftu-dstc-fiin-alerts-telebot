@@ -1,4 +1,3 @@
-import pandas as pd
 from ..fiin_client import get_client
 from ..config import CFG
 from ..notifier import TelegramNotifier
@@ -15,9 +14,9 @@ def run_eod_scan():
         period=260
     ).get_data()
 
-    picks = compute_picks_from_daily_df(data)
+    last_ts = data["timestamp"].max()
+    df_last = data[data["timestamp"] == last_ts].copy()
+
+    picks = compute_picks_from_daily_df(df_last)
     tg = TelegramNotifier()
-    if picks:
-        tg.send("<b>[EOD] V12 picks</b>: " + ", ".join(picks))
-    else:
-        tg.send("<b>[EOD]</b> Không có mã đạt filter hôm nay.")
+    tg.send("<b>[EOD] V12 picks</b>: " + ", ".join(picks) if picks else "<b>[EOD]</b> Không có mã đạt filter hôm nay.")
