@@ -15,10 +15,7 @@ def run_eod_scan():
         period=260
     ).get_data()
 
-    last_ts = data["timestamp"].max()
-    df_last = data[data["timestamp"] == last_ts].copy()
-
-    picks = compute_picks_from_daily_df(df_last)
+    picks = compute_picks_from_daily_df(data)
     tg = TelegramNotifier()
     if picks:
         tg.send("<b>[EOD] V12 picks</b>: " + ", ".join(picks))

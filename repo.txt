@@ -1,0 +1,2554 @@
+├── .env.example
+├── .gitignore
+├── Dockerfile
+├── README.md
+├── app
+    ├── __init__.py
+    ├── config.py
+    ├── fiin_client.py
+    ├── jobs
+    │   ├── eod_scan.py
+    │   └── intraday_stream.py
+    ├── main.py
+    ├── notifier.py
+    └── strategy_adapter.py
+├── requirements.txt
+├── round_2
+    ├── __pycache__
+    │   └── v12.cpython-312.pyc
+    └── v12.py
+├── scripts
+    └── run_local.sh
+└── strategies
+    ├── __init__.py
+    └── v12_adapter.py
+
+
+/.env.example:
+--------------------------------------------------------------------------------
+ 1 | # FiinQuant
+ 2 | FIIN_USER=your_username
+ 3 | FIIN_PASS=your_password
+ 4 | 
+ 5 | # Telegram
+ 6 | BOT_TOKEN=123456:abcdef...
+ 7 | CHAT_ID=-100194xxxx987
+ 8 | THREAD_ID=2
+ 9 | 
+10 | # Universe & timezone
+11 | TICKERS=HPG,SSI,VNM,VIC,VRE,FPT,VCB,CTG,BID,TCB,MBB,MWG,VNINDEX
+12 | TIMEZONE=Asia/Ho_Chi_Minh
+13 | 
+
+
+--------------------------------------------------------------------------------
+/.gitignore:
+--------------------------------------------------------------------------------
+ 1 | 
+ 2 | .clinerules/byterover-rules.md
+ 3 | .kilocode/rules/byterover-rules.md
+ 4 | .roo/rules/byterover-rules.md
+ 5 | .windsurf/rules/byterover-rules.md
+ 6 | .cursor/rules/byterover-rules.mdc
+ 7 | .kiro/steering/byterover-rules.md
+ 8 | .qoder/rules/byterover-rules.md
+ 9 | .augment/rules/byterover-rules.md
+10 | .github/copilot-instructions.md
+11 | AGENTS.md
+12 | /.venv
+13 | .env
+
+
+--------------------------------------------------------------------------------
+/Dockerfile:
+--------------------------------------------------------------------------------
+1 | FROM python:3.11-slim
+2 | WORKDIR /app
+3 | COPY requirements.txt .
+4 | RUN pip install --no-cache-dir -r requirements.txt
+5 | COPY . .
+6 | CMD ["python","-m","app.main"]
+7 | 
+
+
+--------------------------------------------------------------------------------
+/README.md:
+--------------------------------------------------------------------------------
+ 1 | # FinLab Signal Bot
+ 2 | 
+ 3 | Bot Telegram gửi cảnh báo tín hiệu từ chiến lược V12 trên dữ liệu FiinQuantX – gồm EOD (snapshot) và 15’ realtime (callback).\
+ 4 | Yêu cầu Python 3.11+.
+ 5 | 
+ 6 | ## Cài đặt
+ 7 | 
+ 8 | Khuyến nghị tạo môi trường ảo riêng để tách biệt phụ thuộc:
+ 9 | 
+10 | ```bash
+11 | python -m venv .venv
+12 | # Windows PowerShell
+13 | .venv\Scripts\Activate.ps1
+14 | # Windows CMD
+15 | .venv\Scripts\activate.bat
+16 | # macOS/Linux
+17 | source .venv/bin/activate
+18 | ```
+19 | 
+20 | Sau khi kích hoạt môi trường ảo, cài đặt thư viện FiinQuantX và các phụ thuộc còn lại:
+21 | 
+22 | ```bash
+23 | pip install --extra-index-url https://fiinquant.github.io/fiinquantx/simple fiinquantx
+24 | # to update FiinQuantX
+25 | pip install --upgrade --extra-index-url https://fiinquant.github.io/fiinquantx/simple fiinquantx
+26 | pip install -r requirements.txt
+27 | cp .env.example .env  # điền thông tin
+28 | ```
+29 | 
+30 | ## Chạy
+31 | 
+32 | ```bash
+33 | bash scripts/run_local.sh
+34 | ```
+35 | 
+36 | ## Tích hợp V12
+37 | 
+38 | * Thả `v12.py` (bản chuẩn) vào root repo hoặc thêm vào PYTHONPATH.
+39 | * Adapter gọi các hàm: `precompute_technical_indicators_vectorized(df)` và `apply_enhanced_screener_v12(feat)`.
+40 | 
+41 | ## Lịch chạy
+42 | 
+43 | * EOD: 15:01 (T2–T6)
+44 | * Intraday 15’: mở 09:00, đóng 15:00
+45 | 
+46 | ## Ghi chú
+47 | 
+48 | * EOD là confirm; 15’ là early signal. Tôn trọng hạn mức Telegram nếu cần gom batch.
+49 | 
+
+
+--------------------------------------------------------------------------------
+/app/__init__.py:
+--------------------------------------------------------------------------------
+1 | # empty package marker
+2 | 
+
+
+--------------------------------------------------------------------------------
+/app/config.py:
+--------------------------------------------------------------------------------
+ 1 | from dataclasses import dataclass
+ 2 | from dotenv import load_dotenv
+ 3 | import os
+ 4 | 
+ 5 | load_dotenv()
+ 6 | 
+ 7 | @dataclass
+ 8 | class Settings:
+ 9 |     fiin_user: str = os.getenv("FIIN_USER", "")
+10 |     fiin_pass: str = os.getenv("FIIN_PASS", "")
+11 |     bot_token: str = os.getenv("BOT_TOKEN", "")
+12 |     chat_id: str   = os.getenv("CHAT_ID", "")
+13 |     thread_id: int = int(os.getenv("THREAD_ID", "0") or "0")
+14 |     tickers: list  = tuple([s.strip().upper() for s in os.getenv("TICKERS","VNINDEX,VCB,FPT").split(",")])
+15 |     tz: str        = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
+16 | 
+17 | CFG = Settings()
+18 | 
+
+
+--------------------------------------------------------------------------------
+/app/fiin_client.py:
+--------------------------------------------------------------------------------
+1 | from FiinQuantX import FiinSession
+2 | from .config import CFG
+3 | 
+4 | def get_client():
+5 |     assert CFG.fiin_user and CFG.fiin_pass, "Missing FIIN_USER/FIIN_PASS"
+6 |     return FiinSession(username=CFG.fiin_user, password=CFG.fiin_pass).login()
+7 | 
+
+
+--------------------------------------------------------------------------------
+/app/jobs/eod_scan.py:
+--------------------------------------------------------------------------------
+ 1 | import pandas as pd
+ 2 | from ..fiin_client import get_client
+ 3 | from ..config import CFG
+ 4 | from ..notifier import TelegramNotifier
+ 5 | from ..strategy_adapter import compute_picks_from_daily_df
+ 6 | 
+ 7 | def run_eod_scan():
+ 8 |     client = get_client()
+ 9 |     data = client.Fetch_Trading_Data(
+10 |         realtime=False,
+11 |         tickers=list(CFG.tickers),
+12 |         fields=['open','high','low','close','volume','bu','sd','fb','fs','fn'],
+13 |         adjusted=True,
+14 |         by='1d',
+15 |         period=260
+16 |     ).get_data()
+17 | 
+18 |     last_ts = data["timestamp"].max()
+19 |     df_last = data[data["timestamp"] == last_ts].copy()
+20 | 
+21 |     picks = compute_picks_from_daily_df(df_last)
+22 |     tg = TelegramNotifier()
+23 |     if picks:
+24 |         tg.send("<b>[EOD] V12 picks</b>: " + ", ".join(picks))
+25 |     else:
+26 |         tg.send("<b>[EOD]</b> Không có mã đạt filter hôm nay.")
+27 | 
+
+
+--------------------------------------------------------------------------------
+/app/jobs/intraday_stream.py:
+--------------------------------------------------------------------------------
+ 1 | import time
+ 2 | import threading
+ 3 | from FiinQuantX import BarDataUpdate
+ 4 | from ..fiin_client import get_client
+ 5 | from ..config import CFG
+ 6 | from ..notifier import TelegramNotifier
+ 7 | from ..strategy_adapter import early_signal_from_15m_bar
+ 8 | 
+ 9 | _event = None
+10 | _last_alert = {}  # ticker -> last_bar_ts
+11 | _tg = TelegramNotifier()
+12 | 
+13 | 
+14 | def _on_bar_15m(data: BarDataUpdate):
+15 |     df = data.to_dataFrame().sort_values(["ticker", "timestamp"])
+16 |     for tk, g in df.groupby("ticker"):
+17 |         if len(g) < 2:
+18 |             continue
+19 |         prev = g.iloc[-2]  # only handle the closed 15' candle
+20 |         if _last_alert.get(tk) == prev["timestamp"]:
+21 |             continue
+22 |         if early_signal_from_15m_bar(prev):
+23 |             _tg.send(f"<b>[15’ Early]</b> {tk} — BU/SD lệch dương, vol tích cực @ {prev['timestamp']}")
+24 |             _last_alert[tk] = prev["timestamp"]
+25 | 
+26 | 
+27 | def start_intraday_stream(block: bool = False):
+28 |     """Start 15' stream during trading window. If block=False, run in a daemon thread."""
+29 |     client = get_client()
+30 | 
+31 |     def _runner():
+32 |         global _event
+33 |         _event = client.Fetch_Trading_Data(
+34 |             realtime=True,
+35 |             tickers=list(CFG.tickers),
+36 |             fields=['open','high','low','close','volume','bu','sd','fb','fs','fn'],
+37 |             adjusted=True,
+38 |             by='15m',
+39 |             callback=_on_bar_15m,
+40 |             wait_for_full_timeFrame=True
+41 |         )
+42 |         _event.get_data()
+43 |         try:
+44 |             while not _event._stop:
+45 |                 time.sleep(1)
+46 |         except KeyboardInterrupt:
+47 |             stop_intraday_stream()
+48 | 
+49 |     if block:
+50 |         _runner()
+51 |     else:
+52 |         threading.Thread(target=_runner, daemon=True).start()
+53 | 
+54 | 
+55 | def stop_intraday_stream():
+56 |     try:
+57 |         _event.stop()
+58 |     except Exception:
+59 |         pass
+60 | 
+
+
+--------------------------------------------------------------------------------
+/app/main.py:
+--------------------------------------------------------------------------------
+ 1 | import asyncio
+ 2 | from apscheduler.schedulers.asyncio import AsyncIOScheduler
+ 3 | from apscheduler.triggers.cron import CronTrigger
+ 4 | from .config import CFG
+ 5 | from .jobs.eod_scan import run_eod_scan
+ 6 | from .jobs.intraday_stream import start_intraday_stream, stop_intraday_stream
+ 7 | 
+ 8 | 
+ 9 | async def main():
+10 |     sch = AsyncIOScheduler(timezone=CFG.tz)
+11 |     sch.add_job(run_eod_scan, CronTrigger(day_of_week="mon-fri", hour=15, minute=1))
+12 |     sch.add_job(lambda: start_intraday_stream(block=False), CronTrigger(day_of_week="mon-fri", hour=9, minute=0))
+13 |     sch.add_job(stop_intraday_stream, CronTrigger(day_of_week="mon-fri", hour=15, minute=0))
+14 |     sch.start()
+15 | 
+16 |     try:
+17 |         while True:
+18 |             await asyncio.sleep(3600)
+19 |     except (KeyboardInterrupt, SystemExit):
+20 |         stop_intraday_stream()
+21 | 
+22 | 
+23 | if __name__ == "__main__":
+24 |     asyncio.run(main())
+25 | 
+
+
+--------------------------------------------------------------------------------
+/app/notifier.py:
+--------------------------------------------------------------------------------
+ 1 | import requests
+ 2 | from .config import CFG
+ 3 | 
+ 4 | class TelegramNotifier:
+ 5 |     def __init__(self, token: str = None, chat_id: str = None, thread_id: int | None = None):
+ 6 |         self.token = token or CFG.bot_token
+ 7 |         self.chat_id = chat_id or CFG.chat_id
+ 8 |         self.thread_id = thread_id if thread_id is not None else (CFG.thread_id or None)
+ 9 | 
+10 |     def send(self, text: str, parse_mode: str = "HTML"):
+11 |         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+12 |         payload = {"chat_id": self.chat_id, "text": text, "parse_mode": parse_mode}
+13 |         if self.thread_id:
+14 |             payload["message_thread_id"] = self.thread_id  # send into specific Topic
+15 |         r = requests.post(url, data=payload, timeout=10)
+16 |         r.raise_for_status()
+17 |         return r.json()
+18 | 
+
+
+--------------------------------------------------------------------------------
+/app/strategy_adapter.py:
+--------------------------------------------------------------------------------
+1 | # Thin re-export so other modules can import from a stable path
+2 | from strategies.v12_adapter import (
+3 |     compute_picks_from_daily_df,
+4 |     early_signal_from_15m_bar,
+5 | )
+6 | __all__ = ["compute_picks_from_daily_df", "early_signal_from_15m_bar"]
+7 | 
+
+
+--------------------------------------------------------------------------------
+/requirements.txt:
+--------------------------------------------------------------------------------
+1 | python-dotenv>=1.0
+2 | pandas>=2.1
+3 | numpy>=1.26
+4 | requests>=2.31
+5 | APScheduler>=3.10
+6 | python-telegram-bot==22.5
+
+
+--------------------------------------------------------------------------------
+/round_2/__pycache__/v12.cpython-312.pyc:
+--------------------------------------------------------------------------------
+https://raw.githubusercontent.com/khoaoe/ftu-dstc-fiin-alerts-telebot/3a09300b2bdef3aa887507ec01305277d03b95c3/round_2/__pycache__/v12.cpython-312.pyc
+
+
+--------------------------------------------------------------------------------
+/round_2/v12.py:
+--------------------------------------------------------------------------------
+   1 | # -*- coding: utf-8 -*-
+   2 | """v12
+   3 | 
+   4 | Automatically generated by Colab.
+   5 | 
+   6 | Original file is located at
+   7 |     https://colab.research.google.com/drive/10zSKNbdlRv3f-lKUK8LBrJJDFqRRE4WY
+   8 | 
+   9 | Đây là 1 file với backtest sát thực tế nhất
+  10 | """
+  11 | 
+  12 | # ===================================================================
+  13 | # 1. CÀI ĐẶT & NẠP CÁC THƯ VIỆN CẦN THIẾT
+  14 | # ===================================================================
+  15 | import pandas as pd
+  16 | import numpy as np
+  17 | import matplotlib.pyplot as plt
+  18 | import warnings
+  19 | from collections import deque
+  20 | from typing import List
+  21 | import os
+  22 | import csv
+  23 | import time
+  24 | from numba import njit, prange
+  25 | 
+  26 | # Tắt các cảnh báo không cần thiết
+  27 | warnings.filterwarnings('ignore', category=FutureWarning)
+  28 | warnings.filterwarnings('ignore', category=UserWarning)
+  29 | 
+  30 | print("Các thư viện đã được nạp thành công.")
+  31 | 
+  32 | """# 2. Logic định lượng và backtest
+  33 | 
+  34 | ## Hàm tính metrics
+  35 | """
+  36 | 
+  37 | @njit
+  38 | def calculate_rolling_max_numba(arr, window):
+  39 |     """Numba optimized rolling max calculation"""
+  40 |     n = len(arr)
+  41 |     result = np.full(n, np.nan)
+  42 |     for i in range(window-1, n):
+  43 |         result[i] = np.max(arr[i-window+1:i+1])
+  44 |     return result
+  45 | 
+  46 | @njit
+  47 | def calculate_rolling_mean_numba(arr, window):
+  48 |     """Numba optimized rolling mean calculation"""
+  49 |     n = len(arr)
+  50 |     result = np.full(n, np.nan)
+  51 |     for i in range(window-1, n):
+  52 |         result[i] = np.mean(arr[i-window+1:i+1])
+  53 |     return result
+  54 | 
+  55 | def precompute_technical_indicators_vectorized(data):
+  56 |     """Vectorized technical indicator calculation"""
+  57 |     print("Đang tính toán các chỉ báo kỹ thuật...")
+  58 | 
+  59 |     # Sao chép dữ liệu để tránh thay đổi bản gốc
+  60 |     data = data.copy()
+  61 | 
+  62 |     # Group by ticker để tính toán hiệu quả
+  63 |     grouped = data.groupby('ticker', group_keys=False)
+  64 | 
+  65 |     # Tính volume_ma20 nếu chưa có
+  66 |     if 'volume_ma20' not in data.columns:
+  67 |         data['volume_ma20'] = grouped['volume'].transform(lambda x: x.rolling(20, min_periods=20).mean())
+  68 | 
+  69 |     # Đảm bảo không có giá trị NaN trong volume_ma20
+  70 |     data['volume_ma20'] = data['volume_ma20'].fillna(0)
+  71 | 
+  72 |     # Tính các chỉ báo khác
+  73 |     if 'highest_in_5d' not in data.columns:
+  74 |         data['highest_in_5d'] = grouped['high'].transform(lambda x: x.rolling(5, min_periods=5).max().shift(1))
+  75 | 
+  76 |     if 'sma_5' not in data.columns:
+  77 |         data['sma_5'] = grouped['close'].transform(lambda x: x.rolling(5, min_periods=5).mean())
+  78 | 
+  79 |     if 'market_MA50' not in data.columns:
+  80 |         market_data = data['market_close'].groupby(level=0).first()
+  81 |         market_ma50 = market_data.rolling(50, min_periods=50).mean()
+  82 |         data = data.merge(market_ma50.rename('market_MA50'),
+  83 |                          left_index=True, right_index=True,
+  84 |                          how='left')
+  85 | 
+  86 |     # Tính boll_width cho thị trường nếu chưa có
+  87 |     if 'market_boll_width' not in data.columns:
+  88 |         market_data = data['market_close'].groupby(level=0).first()
+  89 |         market_sma = market_data.rolling(20).mean()
+  90 |         market_std = market_data.rolling(20).std()
+  91 |         data['market_boll_upper'] = market_sma + 2 * market_std
+  92 |         data['market_boll_lower'] = market_sma - 2 * market_std
+  93 |         data['market_boll_width'] = (data['market_boll_upper'] - data['market_boll_lower']) / market_sma
+  94 |         data['market_boll_width'] = data['market_boll_width'].fillna(0.5)
+  95 | 
+  96 |     # Tính ADX cho thị trường nếu chưa có
+  97 |     if 'market_adx' not in data.columns:
+  98 |         market_high = data['high'].groupby(level=0).first()  # Giả định, cần điều chỉnh nếu có market_high
+  99 |         market_low = data['low'].groupby(level=0).first()
+ 100 |         market_close = data['market_close'].groupby(level=0).first()
+ 101 |         market_df = pd.DataFrame({'high': market_high, 'low': market_low, 'close': market_close})
+ 102 |         market_adx = calculate_adx(market_df, n=14)
+ 103 |         data = data.merge(market_adx.rename('market_adx'), left_index=True, right_index=True, how='left')
+ 104 |         data['market_adx'] = data['market_adx'].fillna(25)
+ 105 | 
+ 106 |     return data
+ 107 | 
+ 108 | def optimize_data_structures(data):
+ 109 |     """Optimize data types for memory and speed"""
+ 110 |     print("Optimizing data structures...")
+ 111 | 
+ 112 |     # Convert to more efficient data types
+ 113 |     numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'volume_ma20', 'highest_in_5d', 'sma_5', 'boll_width']
+ 114 |     for col in numeric_cols:
+ 115 |         if col in data.columns:
+ 116 |             data[col] = pd.to_numeric(data[col], downcast='float')
+ 117 | 
+ 118 |     # Use category for ticker to save memory
+ 119 |     data['ticker'] = data['ticker'].astype('category')
+ 120 | 
+ 121 |     return data
+ 122 | 
+ 123 | # Update create_pivot_tables_batch to ensure volume_ma20 is included
+ 124 | def create_pivot_tables_batch(backtest_data):
+ 125 |     """Tạo tất cả pivot tables cùng lúc để quản lý bộ nhớ tốt hơn"""
+ 126 |     print("Đang tạo pivot tables...")
+ 127 | 
+ 128 |     columns_to_pivot = {
+ 129 |         'close': 'close_adj' if 'close_adj' in backtest_data.columns else 'close',
+ 130 |         'open': 'open',
+ 131 |         'high': 'high',
+ 132 |         'low': 'low',
+ 133 |         'boll_width': 'boll_width',
+ 134 |         'volume_ma20': 'volume_ma20',  # Đảm bảo cột này được pivot
+ 135 |         'volume_spike': 'volume_spike',
+ 136 |         'sma_5': 'sma_5',
+ 137 |         'volume': 'volume'
+ 138 |     }
+ 139 | 
+ 140 |     pivot_tables = {}
+ 141 |     for name, col in columns_to_pivot.items():
+ 142 |         if col in backtest_data.columns:
+ 143 |             pivot_tables[f'pivoted_{name}'] = backtest_data.pivot_table(
+ 144 |                 index='time', columns='ticker', values=col, fill_value=np.nan
+ 145 |             )
+ 146 |         else:
+ 147 |             print(f"Cảnh báo: Cột {col} không tìm thấy trong dữ liệu")
+ 148 | 
+ 149 |     return pivot_tables
+ 150 | 
+ 151 | @njit
+ 152 | def check_exit_conditions_numba(high_val, low_val, tp_val, sl_val, holding_days, min_settlement_days=2):
+ 153 |     """Numba optimized exit condition checking with T+2 settlement constraint"""
+ 154 |     if holding_days < min_settlement_days:
+ 155 |         return False, False, False
+ 156 | 
+ 157 |     trigger_tp = high_val >= tp_val
+ 158 |     trigger_sl = low_val <= sl_val
+ 159 |     return trigger_tp, trigger_sl, True
+ 160 | 
+ 161 | def calculate_market_volatility_optimized(data, window):
+ 162 |     """Optimized market volatility calculation"""
+ 163 |     market_returns = data.groupby('time')['market_close'].first().pct_change()
+ 164 |     rolling_vol = market_returns.rolling(window).std()
+ 165 |     vol_threshold = rolling_vol.quantile(0.8)
+ 166 |     return (rolling_vol > vol_threshold).to_dict()
+ 167 | 
+ 168 | def calculate_adx(df, n=14):
+ 169 |     # df: DataFrame với columns ['high','low','close'] cho 1 mã hoặc toàn bộ time series
+ 170 |     # Return: ADX series (aligned with df.index)
+ 171 |     high = df['high']; low = df['low']; close = df['close']
+ 172 |     plus_dm = high.diff().where((high.diff() > low.diff()), 0).clip(lower=0)
+ 173 |     minus_dm = (-low.diff()).where((low.diff() > high.diff()), 0).clip(lower=0)
+ 174 |     tr1 = high - low
+ 175 |     tr2 = (high - close.shift()).abs()
+ 176 |     tr3 = (low - close.shift()).abs()
+ 177 |     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+ 178 |     atr = tr.rolling(n).mean()
+ 179 |     plus_di = 100 * (plus_dm.ewm(alpha=1/n).mean() / atr)
+ 180 |     minus_di = 100 * (minus_dm.ewm(alpha=1/n).mean() / atr)
+ 181 |     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+ 182 |     adx = dx.ewm(alpha=1/n).mean()
+ 183 |     return adx.fillna(0)
+ 184 | 
+ 185 | def bollinger_bands(series, n=20, k=2):
+ 186 |     sma = series.rolling(n).mean()
+ 187 |     std = series.rolling(n).std()
+ 188 |     upper = sma + k * std
+ 189 |     lower = sma - k * std
+ 190 |     width = (upper - lower) / sma
+ 191 |     return upper, lower, width
+ 192 | 
+ 193 | def atr(series_high, series_low, series_close, n=14):
+ 194 |     tr1 = series_high - series_low
+ 195 |     tr2 = (series_high - series_close.shift()).abs()
+ 196 |     tr3 = (series_low - series_close.shift()).abs()
+ 197 |     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+ 198 |     return tr.rolling(n).mean()
+ 199 | 
+ 200 | def is_business_day(date):
+ 201 |     """Kiểm tra ngày làm việc (Thứ 2-6)."""
+ 202 |     return date.weekday() < 5
+ 203 | 
+ 204 | def get_settlement_date(current_date, all_dates, t_plus=2):
+ 205 |     """Tính ngày giải phóng vốn T+2 (chỉ tính ngày làm việc)."""
+ 206 |     business_days = 0
+ 207 |     idx = all_dates.index(current_date)
+ 208 |     while business_days < t_plus and idx < len(all_dates) - 1:
+ 209 |         idx += 1
+ 210 |         if is_business_day(all_dates[idx]):
+ 211 |             business_days += 1
+ 212 |     return all_dates[idx]
+ 213 | 
+ 214 | def calculate_market_volatility(data, window=20):
+ 215 |     """Tính volatility thị trường."""
+ 216 |     vni_vol = data.groupby('time')['market_close'].std().rolling(window).mean()
+ 217 |     vni_vol_current = data.groupby('time')['market_close'].std()
+ 218 |     vol_spike = vni_vol_current > (vni_vol + 2 * vni_vol.std())
+ 219 |     return vol_spike
+ 220 | 
+ 221 | def log_portfolio_to_csv(portfolio_history, filename='portfolio_log.csv'):
+ 222 |     """Lưu portfolio history."""
+ 223 |     df_log = pd.DataFrame(portfolio_history)
+ 224 |     df_log.to_csv(filename, index=False)
+ 225 |     print(f"Portfolio log saved to {filename}")
+ 226 | 
+ 227 | def log_trades_to_csv(trades, filename='trades_log.csv'):
+ 228 |     df_trades = pd.DataFrame(trades)
+ 229 |     if not df_trades.empty:
+ 230 |         df_trades['return_pct'] = ((df_trades['exit_price'] - df_trades['entry_price']) / df_trades['entry_price']) * 100
+ 231 |         df_trades['T+2_violation'] = df_trades['holding_days'] < 2
+ 232 |         if df_trades['T+2_violation'].any():
+ 233 |             print(f"Warning: {df_trades['T+2_violation'].sum()} trades violate T+2 rule")
+ 234 |             print(df_trades[df_trades['T+2_violation'][['ticker', 'entry_date', 'exit_date', 'holding_days']]].head())
+ 235 |         df_trades.to_csv(filename, index=False)
+ 236 |     print(f"Trades log saved to {filename}")
+ 237 | 
+ 238 | def log_drawdown_to_csv(df_history, filename='drawdown_log.csv'):
+ 239 |     """Lưu drawdown log."""
+ 240 |     drawdown = (df_history['Portfolio Value'] - df_history['Portfolio Value'].cummax()) / df_history['Portfolio Value'].cummax()
+ 241 |     drawdown_log = pd.DataFrame({'date': df_history.index, 'drawdown': drawdown})
+ 242 |     drawdown_log.to_csv(filename, index=False)
+ 243 |     print(f"Drawdown log saved to {filename}")
+ 244 | 
+ 245 | def calculate_benchmark(data, start_date_str, end_date_str, initial_capital):
+ 246 |     vni_data = data[['market_close']].dropna()
+ 247 |     vni_data = vni_data[~vni_data.index.duplicated(keep='first')]
+ 248 |     vni_data = vni_data[(vni_data.index >= start_date_str) & (vni_data.index <= end_date_str)]
+ 249 |     start_price = vni_data['market_close'].iloc[0]
+ 250 |     return (vni_data['market_close'] / start_price) * initial_capital
+ 251 | 
+ 252 | def calculate_metrics(performance_series):
+ 253 |     total_return = (performance_series.iloc[-1] / performance_series.iloc[0]) - 1
+ 254 |     daily_returns = performance_series.pct_change().dropna()
+ 255 |     sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0
+ 256 |     cumulative_max = performance_series.cummax()
+ 257 |     drawdown = (performance_series - cumulative_max) / cumulative_max
+ 258 |     max_drawdown = -drawdown.min()
+ 259 |     years = (performance_series.index[-1] - performance_series.index[0]).days / 365.25
+ 260 |     cagr = ((performance_series.iloc[-1] / performance_series.iloc[0]) ** (1 / years) - 1) if years > 0 else 0
+ 261 |     calmar_ratio = cagr / max_drawdown if max_drawdown > 0 else np.inf
+ 262 |     return {
+ 263 |         "Total Return": total_return,
+ 264 |         "Sharpe Ratio (Annualized)": sharpe_ratio,
+ 265 |         "Max Drawdown": max_drawdown,
+ 266 |         "Calmar Ratio": calmar_ratio
+ 267 |     }
+ 268 | 
+ 269 | def calculate_enhanced_metrics(df_history, trades):
+ 270 |     if df_history.empty or not trades:
+ 271 |         return {}
+ 272 | 
+ 273 |     total_return = (df_history.iloc[-1]['Portfolio Value'] / df_history.iloc[0]['Portfolio Value'] - 1)
+ 274 |     daily_returns = df_history['Portfolio Value'].pct_change().dropna()
+ 275 |     sharpe_ratio = (daily_returns.mean() * 252) / (daily_returns.std() * np.sqrt(252)) if daily_returns.std() != 0 else 0
+ 276 |     cumulative_max = df_history['Portfolio Value'].cummax()
+ 277 |     drawdown = (df_history['Portfolio Value'] - cumulative_max) / cumulative_max
+ 278 |     max_drawdown = -drawdown.min()
+ 279 | 
+ 280 |     num_trades = len(trades)
+ 281 |     winning_trades = [t for t in trades if t['profit'] > 0]
+ 282 |     win_rate = len(winning_trades) / num_trades if num_trades > 0 else 0
+ 283 |     avg_holding_days = np.mean([t['holding_days'] for t in trades]) if trades else 0
+ 284 |     total_profit = sum(t['profit'] for t in winning_trades)
+ 285 |     total_loss = sum(abs(t['profit']) for t in trades if t['profit'] < 0)
+ 286 |     profit_factor = total_profit / total_loss if total_loss > 0 else np.inf
+ 287 | 
+ 288 |     losses = [1 if t['profit'] < 0 else 0 for t in trades]
+ 289 |     max_consec_losses = 0
+ 290 |     current_streak = 0
+ 291 |     for loss in losses:
+ 292 |         if loss == 1:
+ 293 |             current_streak += 1
+ 294 |             max_consec_losses = max(max_consec_losses, current_streak)
+ 295 |         else:
+ 296 |             current_streak = 0
+ 297 | 
+ 298 |     years = (df_history.index[-1] - df_history.index[0]).days / 365.25
+ 299 |     cagr = ((df_history.iloc[-1]['Portfolio Value'] / df_history.iloc[0]['Portfolio Value']) ** (1 / years) - 1) if years > 0 else 0
+ 300 |     calmar_ratio = cagr / max_drawdown if max_drawdown > 0 else np.inf
+ 301 | 
+ 302 |     return {
+ 303 |         'Total Return': total_return,
+ 304 |         'CAGR': cagr,
+ 305 |         'Sharpe Ratio': sharpe_ratio,
+ 306 |         'Max Drawdown': max_drawdown,
+ 307 |         'Num Trades': num_trades,
+ 308 |         'Win Rate': win_rate,
+ 309 |         'Avg Holding Days': avg_holding_days,
+ 310 |         'Profit Factor': profit_factor,
+ 311 |         'Max Consec Losses': max_consec_losses,
+ 312 |         'Calmar Ratio': calmar_ratio
+ 313 |     }
+ 314 | 
+ 315 | def calculate_transaction_costs(value, is_buy=True, profit=0, volume=0):
+ 316 |     """Tính chi phí: Phí môi giới 0.15%, thuế 0.1% trên profit (bán), slippage 0.05% nếu low volume."""
+ 317 |     brokerage_fee = 0.0015 * value
+ 318 |     tax = 0.001 * max(profit, 0) if not is_buy else 0
+ 319 |     slippage = 0.0005 * value if volume < 1000000 else 0
+ 320 |     total_cost = brokerage_fee + tax + slippage
+ 321 |     return total_cost
+ 322 | 
+ 323 | @njit
+ 324 | def calculate_rolling_max_numba(arr, window):
+ 325 |     """Numba optimized rolling max calculation"""
+ 326 |     n = len(arr)
+ 327 |     result = np.full(n, np.nan)
+ 328 |     for i in range(window-1, n):
+ 329 |         result[i] = np.max(arr[i-window+1:i+1])
+ 330 |     return result
+ 331 | 
+ 332 | @njit
+ 333 | def calculate_rolling_mean_numba(arr, window):
+ 334 |     """Numba optimized rolling mean calculation"""
+ 335 |     n = len(arr)
+ 336 |     result = np.full(n, np.nan)
+ 337 |     for i in range(window-1, n):
+ 338 |         result[i] = np.mean(arr[i-window+1:i+1])
+ 339 |     return result
+ 340 | 
+ 341 | def calculate_adx(df, n=14):
+ 342 |     """Tính ADX dựa trên high, low, close"""
+ 343 |     high = df['high']
+ 344 |     low = df['low']
+ 345 |     close = df['close']
+ 346 | 
+ 347 |     # Tính True Range (TR)
+ 348 |     tr1 = high - low
+ 349 |     tr2 = abs(high - close.shift(1))
+ 350 |     tr3 = abs(low - close.shift(1))
+ 351 |     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+ 352 | 
+ 353 |     # Tính Directional Movement (+DM, -DM)
+ 354 |     plus_dm = high - high.shift(1)
+ 355 |     minus_dm = low.shift(1) - low
+ 356 |     plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+ 357 |     minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+ 358 | 
+ 359 |     # Tính ATR và DI
+ 360 |     atr = tr.rolling(n).mean()
+ 361 |     plus_di = 100 * (plus_dm.rolling(n).mean() / atr)
+ 362 |     minus_di = 100 * (minus_dm.rolling(n).mean() / atr)
+ 363 | 
+ 364 |     # Tính DX và ADX
+ 365 |     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+ 366 |     adx = dx.rolling(n).mean()
+ 367 | 
+ 368 |     return adx
+ 369 | 
+ 370 | def precompute_technical_indicators_vectorized(data):
+ 371 |     """Vectorized technical indicator calculation"""
+ 372 |     print("Đang tính toán các chỉ báo kỹ thuật...")
+ 373 | 
+ 374 |     data = data.copy()
+ 375 |     grouped = data.groupby('ticker', group_keys=False)
+ 376 | 
+ 377 |     # Tính volume_ma20 nếu chưa có
+ 378 |     if 'volume_ma20' not in data.columns:
+ 379 |         data['volume_ma20'] = grouped['volume'].transform(lambda x: x.rolling(20, min_periods=20).mean())
+ 380 |     data['volume_ma20'] = data['volume_ma20'].fillna(0)
+ 381 | 
+ 382 |     # Tính highest_in_5d
+ 383 |     if 'highest_in_5d' not in data.columns:
+ 384 |         data['highest_in_5d'] = grouped['high'].transform(lambda x: x.rolling(5, min_periods=5).max().shift(1))
+ 385 | 
+ 386 |     # Tính sma_5
+ 387 |     if 'sma_5' not in data.columns:
+ 388 |         data['sma_5'] = grouped['close'].transform(lambda x: x.rolling(5, min_periods=5).mean())
+ 389 | 
+ 390 |     # Tính market_MA50
+ 391 |     if 'market_MA50' not in data.columns:
+ 392 |         market_data = data['market_close'].groupby(level=0).first()
+ 393 |         market_ma50 = market_data.rolling(50, min_periods=50).mean()
+ 394 |         data = data.merge(market_ma50.rename('market_MA50'), left_index=True, right_index=True, how='left')
+ 395 | 
+ 396 |     # Tính market_boll_width
+ 397 |     if 'market_boll_width' not in data.columns:
+ 398 |         market_data = data['market_close'].groupby(level=0).first()
+ 399 |         market_sma = market_data.rolling(20).mean()
+ 400 |         market_std = market_data.rolling(20).std()
+ 401 |         data['market_boll_upper'] = market_sma + 2 * market_std
+ 402 |         data['market_boll_lower'] = market_sma - 2 * market_std
+ 403 |         data['market_boll_width'] = (data['market_boll_upper'] - data['market_boll_lower']) / market_sma
+ 404 |         data['market_boll_width'] = data['market_boll_width'].fillna(0.5)
+ 405 | 
+ 406 |     # Tính market_adx
+ 407 |     if 'market_adx' not in data.columns:
+ 408 |         # Giả định market_high, market_low không có, sử dụng high/low của ticker đại diện
+ 409 |         market_data = data.groupby(level=0).first()[['high', 'low', 'market_close']].rename(columns={'market_close': 'close'})
+ 410 |         market_adx = calculate_adx(market_data, n=14)
+ 411 |         data = data.merge(market_adx.rename('market_adx'), left_index=True, right_index=True, how='left')
+ 412 |         data['market_adx'] = data['market_adx'].fillna(25)
+ 413 | 
+ 414 |     return data
+ 415 | 
+ 416 | def create_pivot_tables_batch(backtest_data):
+ 417 |     """Tạo tất cả pivot tables cùng lúc để quản lý bộ nhớ tốt hơn"""
+ 418 |     print("Đang tạo pivot tables...")
+ 419 | 
+ 420 |     columns_to_pivot = {
+ 421 |         'close': 'close_adj' if 'close_adj' in backtest_data.columns else 'close',
+ 422 |         'open': 'open',
+ 423 |         'high': 'high',
+ 424 |         'low': 'low',
+ 425 |         'boll_width': 'boll_width',
+ 426 |         'volume_ma20': 'volume_ma20',
+ 427 |         'volume_spike': 'volume_spike',
+ 428 |         'sma_5': 'sma_5',
+ 429 |         'volume': 'volume'
+ 430 |     }
+ 431 | 
+ 432 |     pivot_tables = {}
+ 433 |     for name, col in columns_to_pivot.items():
+ 434 |         if col in backtest_data.columns:
+ 435 |             pivot_tables[f'pivoted_{name}'] = backtest_data.pivot_table(
+ 436 |                 index='time', columns='ticker', values=col, fill_value=np.nan
+ 437 |             )
+ 438 |         else:
+ 439 |             print(f"Cảnh báo: Cột {col} không tìm thấy trong dữ liệu")
+ 440 | 
+ 441 |     return pivot_tables
+ 442 | 
+ 443 | """## 2.1. Bộ lọc"""
+ 444 | 
+ 445 | def apply_enhanced_screener_v12_sideway_soft(df_day: pd.DataFrame, min_volume_ma20: int = 100000, max_candidates: int = 20) -> List[str]:
+ 446 |     """Screener nâng cao v12: Tối ưu cho biến động và sideway từ 2023-2025."""
+ 447 |     if df_day.empty:
+ 448 |         return []
+ 449 | 
+ 450 |     required_columns = ['market_close', 'market_MA50', 'market_MA200', 'market_rsi', 'market_adx', 'market_boll_width',
+ 451 |                        'close', 'volume', 'volume_ma20', 'sma_50', 'sma_200', 'rsi_14', 'volume_spike', 'ticker',
+ 452 |                        'macd', 'macd_signal', 'boll_width', 'sma_5', 'atr_14']
+ 453 |     missing = [col for col in required_columns if col not in df_day.columns]
+ 454 |     if missing:
+ 455 |         print(f"Thiếu cột: {missing}")
+ 456 |         return []
+ 457 | 
+ 458 |     df_day = df_day.copy()
+ 459 | 
+ 460 |     market_close = df_day['market_close'].iloc[0]
+ 461 |     market_ma50 = df_day['market_MA50'].iloc[0]
+ 462 |     market_ma200 = df_day['market_MA200'].iloc[0]
+ 463 |     market_rsi = df_day['market_rsi'].iloc[0]
+ 464 |     market_adx = df_day['market_adx'].iloc[0]
+ 465 |     market_boll_width = df_day['market_boll_width'].iloc[0]
+ 466 | 
+ 467 |     is_bull = (market_close > market_ma50) and (market_close > market_ma200) and (market_rsi > 55)
+ 468 |     is_sideway = (market_adx < 25) and (market_boll_width < 0.35) and (35 <= market_rsi <= 60)
+ 469 |     is_bear = not is_bull and not is_sideway
+ 470 | 
+ 471 |     if is_bear:
+ 472 |         return []
+ 473 | 
+ 474 |     df_day.loc[:, 'close_adj'] = df_day['close'] * df_day.get('adj_factor', 1)
+ 475 |     df_filtered = df_day[df_day['volume_ma20'] > min_volume_ma20].copy()
+ 476 |     df_filtered = df_filtered[df_filtered['volume'] > 300000]
+ 477 | 
+ 478 |     df_filtered.loc[:, 'relative_strength'] = ((df_filtered['close_adj'] - df_filtered['sma_50']) / df_filtered['sma_50']) / ((market_close - market_ma50) / market_ma50 + 1e-6)
+ 479 |     df_filtered.loc[:, 'short_momentum'] = (df_filtered['close_adj'] - df_filtered['sma_5']) / df_filtered['sma_5']
+ 480 |     df_filtered.loc[:, 'macd_histogram'] = df_filtered['macd'] - df_filtered['macd_signal']
+ 481 | 
+ 482 |     if is_bull:
+ 483 |         df_filtered = df_filtered[
+ 484 |             (df_filtered['close_adj'] > df_filtered['sma_200']) &
+ 485 |             (df_filtered['close_adj'] > df_filtered['sma_50']) &
+ 486 |             (df_filtered['sma_50'] > df_filtered['sma_200']) &
+ 487 |             # (df_filtered['rsi_14'] > 45) & (df_filtered['rsi_14'] < 80) &  # Thắt chặt RSI để chọn momentum mạnh
+ 488 |             # # (df_filtered['macd'] > df_filtered['macd_signal']) &
+ 489 |             # (df_filtered['volume_spike'] > 0.2) &  # Tăng ngưỡng volume_spike
+ 490 |             # (df_filtered['relative_strength'] > 1.2) &  # Tăng ngưỡng strength
+ 491 |             # (df_filtered['short_momentum'] > 0.02)  # Thêm momentum ngắn hạn
+ 492 |             (df_filtered['rsi_14'] > 50) & (df_filtered['rsi_14'] < 80) &  # mở rộng biên
+ 493 |             # (df_filtered['macd'] > df_filtered['macd_signal']) &           # xác nhận momentum
+ 494 |             (df_filtered['volume_spike'] > 0.3) &                         # dễ bắt nhịp tăng sớm
+ 495 |             (df_filtered['relative_strength'] > 1.05) &                    # giảm ngưỡng strength
+ 496 |             (df_filtered['short_momentum'] > 0.01) &                       # chấp nhận entry sớm
+ 497 |             (df_filtered['close_adj'] > df_filtered['sma_5'])              # xác nhận giá trên SMA5
+ 498 |         ]
+ 499 |     elif is_sideway:
+ 500 |         df_filtered = df_filtered[
+ 501 |             (df_filtered['rsi_14'] > 40) & (df_filtered['rsi_14'] < 55) &
+ 502 |             (df_filtered['boll_width'] < 0.3) &
+ 503 |             (df_filtered['macd_histogram'] > 0.0001) &  # Tín hiệu nhẹ để bắt breakout
+ 504 |             (df_filtered['volume_spike'] > 0.5) &
+ 505 |             (df_filtered['short_momentum'] > 0.025) &
+ 506 |             (df_filtered['close_adj'] > (df_filtered['sma_50'] * 0.95)) &  # Không chọn quá yếu
+ 507 |             (df_filtered['close_adj'] > (df_filtered['sma_200'] * 0.95))   # Tránh cổ phiếu dưới trend dài hạn
+ 508 | 
+ 509 |         ]
+ 510 |         max_candidates = int(max_candidates * 0.8)
+ 511 | 
+ 512 |     if df_filtered.empty:
+ 513 |         print(f"Không có cổ phiếu nào được chọn vào ngày {df_day.index[0]}")
+ 514 |         return []
+ 515 | 
+ 516 |     if is_bull:
+ 517 |         df_filtered.loc[:, 'score'] = (
+ 518 |             df_filtered['relative_strength'] * 0.35 +
+ 519 |             df_filtered['short_momentum'] * 0.25 +
+ 520 |             df_filtered['volume_spike'] * 0.25 +
+ 521 |             df_filtered['macd_histogram'] * 0.15
+ 522 |         )
+ 523 | 
+ 524 |     elif is_sideway:
+ 525 |         df_filtered.loc[:, 'boll_proximity'] = (df_filtered['close_adj'] - df_filtered['sma_50']) / (df_filtered['sma_50'] * df_filtered['boll_width'])
+ 526 |         df_filtered.loc[:, 'score'] = (
+ 527 |             (50 - abs(df_filtered['rsi_14'] - 50)) * 0.3 +
+ 528 |             df_filtered['volume_spike'] * 0.25 +
+ 529 |             df_filtered['macd_histogram'] * 0.25 +
+ 530 |             df_filtered['boll_proximity'] * 0.2
+ 531 |         )
+ 532 | 
+ 533 |     df_filtered = df_filtered.nlargest(max_candidates, 'score')
+ 534 |     return df_filtered['ticker'].unique().tolist()
+ 535 | 
+ 536 | def apply_enhanced_screener_v12(df_day: pd.DataFrame, min_volume_ma20: int = 100000, max_candidates: int = 20) -> List[str]:
+ 537 |     """Screener nâng cao v12: Tối ưu cho biến động và sideway từ 2023-2025."""
+ 538 |     if df_day.empty:
+ 539 |         return []
+ 540 | 
+ 541 |     required_columns = [
+ 542 |         'market_close', 'market_MA50', 'market_MA200', 'market_rsi', 'market_adx', 'market_boll_width',
+ 543 |         'close', 'volume', 'volume_ma20', 'sma_50', 'sma_200', 'rsi_14', 'volume_spike', 'ticker',
+ 544 |         'macd', 'macd_signal', 'boll_width', 'sma_5', 'atr_14'
+ 545 |     ]
+ 546 |     missing = [col for col in required_columns if col not in df_day.columns]
+ 547 |     if missing:
+ 548 |         print(f"Thiếu cột: {missing}")
+ 549 |         return []
+ 550 | 
+ 551 |     df_day = df_day.copy()
+ 552 | 
+ 553 |     # === Market context ===
+ 554 |     market_close = df_day['market_close'].iloc[0]
+ 555 |     market_ma50 = df_day['market_MA50'].iloc[0]
+ 556 |     market_ma200 = df_day['market_MA200'].iloc[0]
+ 557 |     market_rsi = df_day['market_rsi'].iloc[0]
+ 558 |     market_adx = df_day['market_adx'].iloc[0]
+ 559 |     market_boll_width = df_day['market_boll_width'].iloc[0]
+ 560 | 
+ 561 |     is_bull = (market_close > market_ma50) and (market_close > market_ma200) and (market_rsi > 55)
+ 562 |     is_sideway = (market_adx < 25) and (market_boll_width < 0.35) and (35 <= market_rsi <= 60)
+ 563 |     is_bear = not is_bull and not is_sideway
+ 564 |     if is_bear:
+ 565 |         return []
+ 566 | 
+ 567 |     # === Chuẩn hóa dữ liệu ===
+ 568 |     df_day.loc[:, 'close_adj'] = df_day['close'] * df_day.get('adj_factor', 1)
+ 569 |     df_filtered = df_day[df_day['volume_ma20'] > min_volume_ma20].copy()
+ 570 |     df_filtered = df_filtered[df_filtered['volume'] > 300000]
+ 571 | 
+ 572 |     df_filtered.loc[:, 'relative_strength'] = (
+ 573 |         ((df_filtered['close_adj'] - df_filtered['sma_50']) / df_filtered['sma_50']) /
+ 574 |         ((market_close - market_ma50) / market_ma50 + 1e-6)
+ 575 |     )
+ 576 |     df_filtered.loc[:, 'short_momentum'] = (df_filtered['close_adj'] - df_filtered['sma_5']) / df_filtered['sma_5']
+ 577 |     df_filtered.loc[:, 'macd_histogram'] = df_filtered['macd'] - df_filtered['macd_signal']
+ 578 | 
+ 579 |     # === Bull Market Strategy ===
+ 580 |     if is_bull:
+ 581 |         df_filtered = df_filtered[
+ 582 |             (df_filtered['close_adj'] > df_filtered['sma_200']) &
+ 583 |             (df_filtered['close_adj'] > df_filtered['sma_50']) &
+ 584 |             (df_filtered['sma_50'] > df_filtered['sma_200']) &
+ 585 |             (df_filtered['rsi_14'] > 50) & (df_filtered['rsi_14'] < 80) &
+ 586 |             (df_filtered['volume_spike'] > 0.3) &
+ 587 |             (df_filtered['relative_strength'] > 1.05) &
+ 588 |             (df_filtered['short_momentum'] > 0.01) &
+ 589 |             (df_filtered['close_adj'] > df_filtered['sma_5'])
+ 590 |         ]
+ 591 |         if df_filtered.empty:
+ 592 |             return []
+ 593 |         df_filtered.loc[:, 'score'] = (
+ 594 |             df_filtered['relative_strength'] * 0.35 +
+ 595 |             df_filtered['short_momentum'] * 0.25 +
+ 596 |             df_filtered['volume_spike'] * 0.25 +
+ 597 |             df_filtered['macd_histogram'] * 0.15
+ 598 |         )
+ 599 | 
+ 600 |     # === Sideway Market Strategy (Breakout-focused) ===
+ 601 |     elif is_sideway:
+ 602 |         df_filtered = df_filtered[
+ 603 |             (df_filtered['rsi_14'] > 48) & (df_filtered['rsi_14'] < 55) &
+ 604 |             (df_filtered['boll_width'] < 0.3) &
+ 605 |             (df_filtered['macd_histogram'] > 0) &
+ 606 |             (df_filtered['volume_spike'] >= 1.0) &
+ 607 |             (df_filtered['short_momentum'] > 0.02) &
+ 608 |             (df_filtered['atr_14'] / df_filtered['close_adj'] > 0.02) &   # loại cổ phiếu dao động quá thấp
+ 609 |             (df_filtered['close_adj'] > df_filtered['sma_50'] * 0.95) &
+ 610 |             (df_filtered['close_adj'] > df_filtered['sma_200'] * 0.95) &
+ 611 |             (df_filtered['close_adj'] > df_filtered['sma_50'] + df_filtered['boll_width'] * df_filtered['sma_50'] * 0.75)
+ 612 |         ]
+ 613 |         if df_filtered.empty:
+ 614 |             return []
+ 615 |         max_candidates = max(5, int(max_candidates * 0.5))  # tập trung top picks
+ 616 | 
+ 617 |         df_filtered.loc[:, 'boll_proximity'] = (
+ 618 |             (df_filtered['close_adj'] - df_filtered['sma_50']) / (df_filtered['sma_50'] * df_filtered['boll_width'])
+ 619 |         )
+ 620 | 
+ 621 |         df_filtered.loc[:, 'score'] = (
+ 622 |             df_filtered['volume_spike'] * 0.4 +
+ 623 |             df_filtered['macd_histogram'] * 0.3 +
+ 624 |             (55 - abs(df_filtered['rsi_14'] - 55)) * 0.2 +
+ 625 |             df_filtered['boll_proximity'] * 0.1
+ 626 |         )
+ 627 | 
+ 628 |     # === Chọn top candidates ===
+ 629 |     df_filtered = df_filtered.nlargest(max_candidates, 'score')
+ 630 |     return df_filtered['ticker'].unique().tolist()
+ 631 | 
+ 632 | """## 2.2. Backtest"""
+ 633 | 
+ 634 | def print_final_portfolio(current_portfolio, pivoted_close, last_date, working_capital, reserve_capital, profit_vault, pending_settlements, trades):
+ 635 |     """
+ 636 |     In danh mục cuối cùng, bao gồm các vị thế mở, giá trị danh mục, trạng thái vốn, và tóm tắt giao dịch.
+ 637 | 
+ 638 |     Parameters:
+ 639 |         current_portfolio (dict): Danh mục hiện tại với các vị thế mở.
+ 640 |         pivoted_close (pd.DataFrame): Pivot table giá đóng cửa.
+ 641 |         last_date: Ngày cuối cùng của backtest.
+ 642 |         working_capital (float): Vốn hoạt động.
+ 643 |         reserve_capital (float): Vốn dự trữ.
+ 644 |         profit_vault (float): Vốn lãi tích lũy.
+ 645 |         pending_settlements (deque): Các khoản thanh toán chờ xử lý.
+ 646 |         trades (list): Lịch sử giao dịch đã đóng.
+ 647 |     """
+ 648 |     print("\n--- Danh Mục Cuối Cùng ---")
+ 649 | 
+ 650 |     # 1. Vị thế mở
+ 651 |     open_positions = []
+ 652 |     stocks_value = 0
+ 653 |     for ticker, pos in current_portfolio.items():
+ 654 |         if ticker in pivoted_close.columns:
+ 655 |             current_price = pivoted_close.at[last_date, ticker]
+ 656 |             price_to_use = current_price if not pd.isna(current_price) else pos['entry_price']
+ 657 |             unrealized_pnl = (price_to_use - pos['avg_cost']) * pos['shares']
+ 658 |             stocks_value += pos['shares'] * price_to_use
+ 659 |             open_positions.append({
+ 660 |                 'Ticker': ticker,
+ 661 |                 'Shares': pos['shares'],
+ 662 |                 'Entry Price': pos['entry_price'],
+ 663 |                 'Avg Cost': pos['avg_cost'],
+ 664 |                 'Current Price': price_to_use,
+ 665 |                 'Unrealized P&L': unrealized_pnl,
+ 666 |                 'Holding Days': (last_date - pos['entry_date']).days
+ 667 |             })
+ 668 | 
+ 669 |     # Hiển thị vị thế mở
+ 670 |     if open_positions:
+ 671 |         df_open = pd.DataFrame(open_positions)
+ 672 |         print("\nVị thế mở:")
+ 673 |         print(df_open.to_string(index=False))
+ 674 |     else:
+ 675 |         print("\nKhông có vị thế mở.")
+ 676 | 
+ 677 |     # 2. Giá trị danh mục
+ 678 |     pending_cash_value = sum(amount for settle_date, amount in pending_settlements)
+ 679 |     total_portfolio_value = working_capital + stocks_value + pending_cash_value + reserve_capital + profit_vault
+ 680 | 
+ 681 |     print("\nGiá trị danh mục:")
+ 682 |     print(f"  Giá trị cổ phiếu: {stocks_value:,.0f} VND")
+ 683 |     print(f"  Tiền mặt chờ thanh toán: {pending_cash_value:,.0f} VND")
+ 684 |     print(f"  Vốn hoạt động (Working Capital): {working_capital:,.0f} VND")
+ 685 |     print(f"  Vốn dự trữ (Reserve Capital): {reserve_capital:,.0f} VND")
+ 686 |     print(f"  Vốn lãi (Profit Vault): {profit_vault:,.0f} VND")
+ 687 |     print(f"  Tổng giá trị danh mục: {total_portfolio_value:,.0f} VND")
+ 688 | 
+ 689 |     # 3. Tóm tắt giao dịch đã đóng
+ 690 |     if trades:
+ 691 |         df_trades = pd.DataFrame(trades)
+ 692 |         total_trades = len(df_trades)
+ 693 |         realized_pnl = df_trades['profit'].sum()
+ 694 |         win_trades = len(df_trades[df_trades['profit'] > 0])
+ 695 |         win_rate = win_trades / total_trades * 100 if total_trades > 0 else 0
+ 696 |         print("\nTóm tắt giao dịch đã đóng:")
+ 697 |         print(f"  Tổng số giao dịch: {total_trades}")
+ 698 |         print(f"  Lãi/Lỗ thực hiện: {realized_pnl:,.0f} VND")
+ 699 |         print(f"  Tỷ lệ thắng: {win_rate:.2f}%")
+ 700 |     else:
+ 701 |         print("\nKhông có giao dịch đã đóng.")
+ 702 | 
+ 703 | def backtest_engine_v12_profit_vault(
+ 704 |     data,
+ 705 |     screener_func,
+ 706 |     start_date_str,
+ 707 |     end_date_str,
+ 708 |     initial_capital,
+ 709 |     base_capital,
+ 710 |     commission_buy=0.001,
+ 711 |     commission_sell_base=0.001,
+ 712 |     tax_sell=0.001,
+ 713 |     trade_limit_pct=0.01,
+ 714 |     max_investment_per_trade_pct=0.10,
+ 715 |     max_open_positions=8,
+ 716 |     min_volume_ma20=200000,
+ 717 |     lot_size=100,
+ 718 |     vol_window=20,
+ 719 |     liquidity_threshold=0.1,
+ 720 |     entry_mode='close',
+ 721 |     atr_multiplier=2.0,
+ 722 |     trailing_stop_pct=0.05,
+ 723 |     partial_profit_pct=0.4,
+ 724 |     min_holding_days=2,
+ 725 |     pyramid_limit=1
+ 726 | ):
+ 727 |     start_time = time.time()
+ 728 |     print("Starting dynamic backtest V12 with market phase adaptation...")
+ 729 |     print(f"Entry mode: {entry_mode}")
+ 730 | 
+ 731 |     # --- DATA PREPARATION ---
+ 732 |     backtest_data = data.copy()
+ 733 |     if 'adj_factor' in backtest_data.columns:
+ 734 |         backtest_data['close'] *= backtest_data['adj_factor']
+ 735 | 
+ 736 |     backtest_data = backtest_data[
+ 737 |         (backtest_data.index >= start_date_str) &
+ 738 |         (backtest_data.index <= end_date_str)
+ 739 |     ].copy()
+ 740 | 
+ 741 |     print(f"Data preparation completed in {time.time() - start_time:.2f}s")
+ 742 | 
+ 743 |     # Create pivot tables
+ 744 |     pivot_start = time.time()
+ 745 |     pivot_tables = create_pivot_tables_batch(backtest_data)
+ 746 |     print(f"Pivot tables created in {time.time() - pivot_start:.2f}s")
+ 747 | 
+ 748 |     pivoted_close = pivot_tables.get('pivoted_close')
+ 749 |     pivoted_open = pivot_tables.get('pivoted_open')
+ 750 |     pivoted_high = pivot_tables.get('pivoted_high')
+ 751 |     pivoted_low = pivot_tables.get('pivoted_low')
+ 752 |     pivoted_boll_width = pivot_tables.get('pivoted_boll_width')
+ 753 |     pivoted_boll_upper = pivot_tables.get('pivoted_boll_upper')
+ 754 |     pivoted_boll_lower = pivot_tables.get('pivoted_boll_lower')
+ 755 |     pivoted_volume_ma20 = pivot_tables.get('pivoted_volume_ma20')
+ 756 |     pivoted_volume_spike = pivot_tables.get('pivoted_volume_spike')
+ 757 |     pivoted_sma_5 = pivot_tables.get('pivoted_sma_5')
+ 758 |     pivoted_volume = pivot_tables.get('pivoted_volume')
+ 759 |     pivoted_rsi = pivot_tables.get('pivoted_rsi_14')
+ 760 |     pivoted_mfi = pivot_tables.get('pivoted_mfi_14')
+ 761 |     pivoted_obv = pivot_tables.get('pivoted_obv')
+ 762 |     pivoted_sma_50 = pivot_tables.get('pivoted_sma_50')
+ 763 |     pivoted_macd = pivot_tables.get('pivoted_macd')
+ 764 | 
+ 765 |     # Pre-calculate market volatility
+ 766 |     vol_spike_series = calculate_market_volatility(backtest_data, vol_window)
+ 767 | 
+ 768 |     # --- BACKTEST VARIABLES ---
+ 769 |     profit_vault = 0  # Khởi tạo profit_vault = 0 thay vì initial_capital - base_capital
+ 770 |     reserve_capital = 0
+ 771 |     portfolio_history = []
+ 772 |     current_portfolio = {}
+ 773 |     pending_settlements = deque()  # Chỉ chứa tiền bán chờ thanh toán
+ 774 |     trades = []
+ 775 | 
+ 776 |     all_dates = pivoted_close.index.tolist()
+ 777 |     total_dates = len(all_dates)
+ 778 |     date_to_idx = {date: idx for idx, date in enumerate(all_dates)}
+ 779 |     portfolio_values = np.zeros(total_dates)
+ 780 |     working_capital = base_capital  # Khởi tạo working_capital bằng base_capital
+ 781 | 
+ 782 |     print(f"Starting main backtest loop for {total_dates} dates...")
+ 783 |     loop_start = time.time()
+ 784 | 
+ 785 |     # --- MAIN BACKTEST LOOP ---
+ 786 |     for i, date in enumerate(all_dates):
+ 787 |         if i % 500 == 0:
+ 788 |             print(f"Processing date {i+1}/{total_dates} ({(i+1)/total_dates*100:.1f}%)")
+ 789 | 
+ 790 |         # 1. Settle pending settlements (chỉ tiền bán)
+ 791 |         while pending_settlements and pending_settlements[0][0] <= date:
+ 792 |             _, amount = pending_settlements.popleft()
+ 793 |             working_capital += amount
+ 794 | 
+ 795 |         # Tính total_cost_of_stocks (giá vốn của cổ phiếu)
+ 796 |         total_cost_of_stocks = sum(pos['shares'] * pos['avg_cost'] * (1 + commission_buy) for pos in current_portfolio.values())
+ 797 |         pending_cash_value = sum(amount for _, amount in pending_settlements)
+ 798 | 
+ 799 |         target_working_capital = max(base_capital - total_cost_of_stocks - pending_cash_value, 0)
+ 800 |         if working_capital > target_working_capital:
+ 801 |             excess = working_capital - target_working_capital
+ 802 |             profit_vault += excess
+ 803 |             working_capital = target_working_capital
+ 804 |         elif working_capital < target_working_capital and profit_vault > 0:
+ 805 |             deficit = target_working_capital - working_capital
+ 806 |             amount_to_take = min(deficit, profit_vault)
+ 807 |             profit_vault -= amount_to_take
+ 808 |             working_capital += amount_to_take
+ 809 | 
+ 810 |         # 2. Market phase detection
+ 811 |         market_row = backtest_data.loc[date].iloc[0] if date in backtest_data.index else None
+ 812 |         if market_row is not None:
+ 813 |             market_close = market_row['market_close']
+ 814 |             market_ma50 = market_row['market_MA50']
+ 815 |             market_ma200 = market_row['market_MA200']
+ 816 |             market_rsi = market_row['market_rsi']
+ 817 |             market_adx = market_row['market_adx']
+ 818 |             market_boll_width = market_row['market_boll_width']
+ 819 | 
+ 820 |         is_bull = (market_close > market_ma50) and (market_close > market_ma200) and (market_rsi > 50)
+ 821 |         is_sideway = (market_adx < 20) and (market_boll_width < 0.4) and (40 <= market_rsi <= 60)
+ 822 |         is_bear = (market_close < market_ma200) or (market_rsi < 30)
+ 823 | 
+ 824 |         market_phase = 'bull' if is_bull else 'sideway' if is_sideway else 'bear'
+ 825 |         position_multiplier = 1.2 if is_bull else 0.5 if is_sideway else 0.0  # Tăng trong bull, giảm trong sideway
+ 826 |         max_hold_days = 45 if is_bull else 20 if is_sideway else 15  # Dynamic hold days
+ 827 |         loss_exit_threshold = -0.10 if is_bull else -0.03 if is_sideway else -0.12  # Nới lỏng trong bull, chặt trong sideway
+ 828 |         atr_mult = 2.0 if is_bull else 1.2 if is_sideway else 2.2  # Tăng ATR trong bull cho SL/TP rộng hơn
+ 829 |         pyramid_limit_phase = 2 if is_bull else 1  # Tăng pyramid trong bull
+ 830 | 
+ 831 |         # 3. Portfolio management with enhanced exit logic
+ 832 |         positions_to_remove = []
+ 833 |         for ticker, pos in current_portfolio.items():
+ 834 |             if ticker not in pivoted_close.columns:
+ 835 |                 continue
+ 836 | 
+ 837 |             open_val = pivoted_open.at[date, ticker]
+ 838 |             high_val = pivoted_high.at[date, ticker]
+ 839 |             low_val = pivoted_low.at[date, ticker]
+ 840 |             close_val = pivoted_close.at[date, ticker]
+ 841 |             rsi_val = pivoted_rsi.at[date, ticker] if pivoted_rsi is not None else None
+ 842 |             mfi_val = pivoted_mfi.at[date, ticker] if pivoted_mfi is not None else None
+ 843 |             obv_val = pivoted_obv.at[date, ticker] if pivoted_obv is not None else None
+ 844 |             sma5_val = pivoted_sma_5.at[date, ticker] if pivoted_sma_5 is not None else close_val
+ 845 |             sma50_val = pivoted_sma_50.at[date, ticker] if pivoted_sma_50 is not None else close_val
+ 846 | 
+ 847 |             if pd.isna(close_val):
+ 848 |                 continue
+ 849 | 
+ 850 |             holding_days = (date - pos['entry_date']).days
+ 851 |             tp = pos['tp']
+ 852 |             sl = pos['sl']
+ 853 |             trailing_sl = pos.get('trailing_sl', pos['entry_price'] * (1 - trailing_stop_pct))
+ 854 |             highest_price = pos.get('highest_price', pos['entry_price'])
+ 855 | 
+ 856 |             # Update trailing stop
+ 857 |             if high_val > highest_price:
+ 858 |                 highest_price = high_val
+ 859 |                 trailing_sl = highest_price * (1 - trailing_stop_pct)
+ 860 |                 pos['highest_price'] = highest_price
+ 861 |                 pos['trailing_sl'] = trailing_sl
+ 862 | 
+ 863 |             # Adjust TP/SL for sideway
+ 864 |             if market_phase == 'sideway' and pivoted_boll_upper is not None and pivoted_boll_lower is not None:
+ 865 |                 tp = min(tp, pivoted_boll_upper.at[date, ticker]) if not pd.isna(pivoted_boll_upper.at[date, ticker]) else tp
+ 866 |                 sl = max(sl, pivoted_boll_lower.at[date, ticker]) if not pd.isna(pivoted_boll_lower.at[date, ticker]) else sl
+ 867 | 
+ 868 |             trigger_tp = False
+ 869 |             trigger_sl = False
+ 870 |             exit_price = None
+ 871 |             partial_exit = False
+ 872 |             exit_type = "Normal"
+ 873 | 
+ 874 |             # Check gap at open
+ 875 |             if not pd.isna(open_val) and holding_days >= min_holding_days:
+ 876 |                 if open_val >= tp:
+ 877 |                     trigger_tp = True
+ 878 |                     exit_price = open_val
+ 879 |                     partial_exit = True
+ 880 |                     exit_type = "Pyramid" if pos.get('pyramid_count', 0) > 0 else "Normal"
+ 881 |                 elif open_val <= min(sl, trailing_sl):
+ 882 |                     trigger_sl = True
+ 883 |                     exit_price = open_val
+ 884 |                     exit_type = "Normal"
+ 885 | 
+ 886 |             # Check intraday
+ 887 |             if exit_price is None and holding_days >= min_holding_days:
+ 888 |                 if high_val >= tp:
+ 889 |                     trigger_tp = True
+ 890 |                     exit_price = close_val
+ 891 |                     partial_exit = True
+ 892 |                     exit_type = "Pyramid" if pos.get('pyramid_count', 0) > 0 else "Normal"
+ 893 |                 elif low_val <= min(sl, trailing_sl):
+ 894 |                     trigger_sl = True
+ 895 |                     exit_price = close_val
+ 896 |                     exit_type = "Normal"
+ 897 | 
+ 898 |             # Check weakness and market conditions
+ 899 |             prev_obv = pivoted_obv.at[all_dates[max(0, i-1)], ticker] if i > 0 and pivoted_obv is not None else obv_val
+ 900 |             is_weak = (
+ 901 |                 rsi_val is not None and rsi_val < 30 and
+ 902 |                 mfi_val is not None and mfi_val < 20 and
+ 903 |                 obv_val is not None and obv_val < prev_obv
+ 904 |             )
+ 905 |             current_profit_pct = (close_val / pos['entry_price'] - 1)
+ 906 |             trigger_end = (holding_days >= max_hold_days or is_weak or
+ 907 |                           (market_phase == 'bear' and current_profit_pct < loss_exit_threshold) or
+ 908 |                           (market_phase == 'sideway' and current_profit_pct < -0.03))
+ 909 |             extended_hold = holding_days >= 50 and current_profit_pct > 0.08 and market_phase == 'bull'
+ 910 |             if extended_hold:
+ 911 |                 trigger_end = False
+ 912 | 
+ 913 |             # Thêm check momentum cho early exit trong sideway
+ 914 |             if market_phase == 'sideway' and sma5_val < sma50_val and current_profit_pct < 0.01:
+ 915 |                 trigger_end = True
+ 916 |                 exit_type = "Momentum Loss"
+ 917 | 
+ 918 |             # Pyramiding Logic (chỉ áp dụng trong bull market)
+ 919 |             pyramid_triggered = False
+ 920 |             if (not trigger_tp and not trigger_sl and not trigger_end and
+ 921 |                 market_phase == 'bull' and
+ 922 |                 holding_days >= 2 and holding_days <= 10 and
+ 923 |                 current_profit_pct > 0.05 and current_profit_pct < 0.10 and
+ 924 |                 pos.get('pyramid_count', 0) < pyramid_limit_phase):  # Sử dụng pyramid_limit_phase
+ 925 | 
+ 926 |                 add_shares = int(pos['shares'] * 0.2 / lot_size) * lot_size
+ 927 |                 add_cost = add_shares * close_val * (1 + commission_buy)
+ 928 |                 if working_capital >= add_cost:
+ 929 |                     new_avg_cost = (pos['shares'] * pos['avg_cost'] + add_shares * close_val) / (pos['shares'] + add_shares)
+ 930 |                     pos['avg_cost'] = new_avg_cost
+ 931 |                     pos['shares'] += add_shares
+ 932 |                     pos['pyramid_count'] = pos.get('pyramid_count', 0) + 1
+ 933 |                     pos['tp'] = close_val * 1.12
+ 934 |                     pos['trailing_sl'] = close_val * (1 - trailing_stop_pct * 0.7)
+ 935 |                     pyramid_triggered = True
+ 936 |                     working_capital -= add_cost  # Trừ trực tiếp từ working_capital
+ 937 |                     print(f"Pyramiding triggered for {ticker}: Added {add_shares} shares at {close_val}")
+ 938 | 
+ 939 |             # Exit logic
+ 940 |             if (trigger_tp or trigger_sl or trigger_end) and holding_days >= min_holding_days and not pyramid_triggered:
+ 941 |                 if trigger_end and exit_price is None:
+ 942 |                     exit_price = close_val
+ 943 |                     exit_type = "Pyramid" if pos.get('pyramid_count', 0) > 0 else "Normal"
+ 944 | 
+ 945 |                 volume_today = pivoted_volume.at[date, ticker] if ticker in pivoted_volume.columns else 0
+ 946 |                 shares = pos['shares']
+ 947 |                 shares_to_sell = int(shares * partial_profit_pct / lot_size) * lot_size if trigger_tp and partial_exit else shares
+ 948 |                 can_sell_today = (not pd.isna(volume_today) and volume_today > 0 and
+ 949 |                                 shares_to_sell <= volume_today * liquidity_threshold)
+ 950 | 
+ 951 |                 use_exit_price = exit_price
+ 952 |                 exit_date = date
+ 953 |                 if not can_sell_today:
+ 954 |                     next_idx = i
+ 955 |                     while next_idx < total_dates - 1:
+ 956 |                         next_idx += 1
+ 957 |                         next_date = all_dates[next_idx]
+ 958 |                         if (next_date - pos['entry_date']).days >= min_holding_days:
+ 959 |                             next_open_price = pivoted_open.at[next_date, ticker]
+ 960 |                             if not pd.isna(next_open_price):
+ 961 |                                 use_exit_price = next_open_price
+ 962 |                                 exit_date = next_date
+ 963 |                                 break
+ 964 |                     else:
+ 965 |                         use_exit_price = close_val
+ 966 |                         exit_date = date
+ 967 | 
+ 968 |                 # Calculate proceeds
+ 969 |                 gross_proceeds = use_exit_price * shares_to_sell
+ 970 |                 net_proceeds = gross_proceeds - (gross_proceeds * (commission_sell_base + tax_sell))
+ 971 |                 if net_proceeds <= 0:  # Không ghi nhận nếu âm
+ 972 |                     continue
+ 973 |                 settlement_idx = date_to_idx.get(exit_date, i) + 2
+ 974 |                 settlement_date = all_dates[min(settlement_idx, total_dates - 1)]
+ 975 |                 pending_settlements.append((settlement_date, net_proceeds))
+ 976 | 
+ 977 |                 holding_days_exit = (exit_date - pos['entry_date']).days
+ 978 |                 if holding_days_exit < min_holding_days:
+ 979 |                     continue
+ 980 | 
+ 981 |                 # Record trade
+ 982 |                 profit = net_proceeds - (shares_to_sell * pos['avg_cost'] * (1 + commission_buy))
+ 983 |                 trades.append({
+ 984 |                     'ticker': ticker,
+ 985 |                     'entry_date': pos['entry_date'],
+ 986 |                     'exit_date': exit_date,
+ 987 |                     'entry_price': pos['entry_price'],
+ 988 |                     'exit_price': use_exit_price,
+ 989 |                     'shares': shares_to_sell,
+ 990 |                     'profit': profit,
+ 991 |                     'holding_days': holding_days_exit,
+ 992 |                     'exit_type': exit_type
+ 993 |                 })
+ 994 | 
+ 995 |                 if partial_exit and trigger_tp:
+ 996 |                     pos['shares'] -= shares_to_sell
+ 997 |                     pos['tp'] = use_exit_price * 1.15
+ 998 |                     pos['sl'] = max(pos['sl'], use_exit_price * (1 - trailing_stop_pct * 1.2))
+ 999 |                 else:
+1000 |                     positions_to_remove.append(ticker)
+1001 | 
+1002 |         for ticker in positions_to_remove:
+1003 |             if ticker in current_portfolio:
+1004 |                 del current_portfolio[ticker]
+1005 | 
+1006 |         # 5. Dynamic rebalancing
+1007 |         total_cost_of_stocks = sum(pos['shares'] * pos['avg_cost'] * (1 + commission_buy) for pos in current_portfolio.values())
+1008 |         pending_cash_value = sum(amount for _, amount in pending_settlements)
+1009 |         target_working_capital = max(base_capital - total_cost_of_stocks - pending_cash_value, 0)
+1010 |         if working_capital > target_working_capital:
+1011 |             excess = working_capital - target_working_capital
+1012 |             profit_vault += excess
+1013 |             working_capital = target_working_capital
+1014 |         elif working_capital < target_working_capital and profit_vault > 0:
+1015 |             deficit = target_working_capital - working_capital
+1016 |             amount_to_take = min(deficit, profit_vault)
+1017 |             profit_vault -= amount_to_take
+1018 |             working_capital += amount_to_take
+1019 | 
+1020 |         # 6. Entry logic
+1021 |         date_mask = backtest_data.index == date
+1022 |         today_data_unfiltered = backtest_data[date_mask]
+1023 | 
+1024 |         if not today_data_unfiltered.empty:
+1025 |             watchlist = screener_func(today_data_unfiltered, min_volume_ma20)
+1026 |             print(f"Watchlist {date}: {watchlist}")
+1027 | 
+1028 |         if entry_mode == 'close' and watchlist and len(current_portfolio) < max_open_positions and working_capital > 0:
+1029 |             ticker_mask = backtest_data['ticker'].isin(watchlist)
+1030 |             today_data = backtest_data[date_mask & ticker_mask]
+1031 | 
+1032 |             if not today_data.empty:
+1033 |                 candidates = today_data
+1034 |                 if len(watchlist) > 1 and 'score' in candidates.columns:
+1035 |                     candidates = candidates.sort_values('score', ascending=False)
+1036 | 
+1037 |                 slots_available = int((max_open_positions - len(current_portfolio)) * position_multiplier)
+1038 |                 if market_phase == 'bear':
+1039 |                     slots_available = max(1, slots_available // 2)
+1040 |                 allocation_multiplier = 1.1 if slots_available > 2 else 1.0
+1041 |                 max_investment = base_capital * max_investment_per_trade_pct
+1042 | 
+1043 |                 executed_count = 0
+1044 |                 for idx, row in candidates.head(slots_available).iterrows():
+1045 |                     ticker = row['ticker']
+1046 |                     if ticker in current_portfolio:
+1047 |                         continue
+1048 | 
+1049 |                     entry_price = row['close']
+1050 |                     if entry_price <= 0:
+1051 |                         continue
+1052 | 
+1053 |                     investment_per_stock = min(
+1054 |                         (working_capital / slots_available) * position_multiplier * allocation_multiplier,
+1055 |                         max_investment
+1056 |                     )
+1057 | 
+1058 |                     intended_shares = (investment_per_stock / (1 + commission_buy)) / entry_price
+1059 |                     max_shares_by_volume = row['volume_ma20'] * trade_limit_pct
+1060 |                     actual_shares_to_buy = min(intended_shares, max_shares_by_volume)
+1061 |                     actual_shares_to_buy = int(actual_shares_to_buy / lot_size) * lot_size
+1062 | 
+1063 |                     if actual_shares_to_buy < lot_size:
+1064 |                         continue
+1065 | 
+1066 |                     actual_cost = actual_shares_to_buy * entry_price * (1 + commission_buy)
+1067 | 
+1068 |                     if actual_shares_to_buy * entry_price > row['volume'] * row['close'] * liquidity_threshold:
+1069 |                         continue
+1070 | 
+1071 |                     projected_capital = working_capital - actual_cost
+1072 |                     if projected_capital < 0 or working_capital == 0:
+1073 |                         continue
+1074 | 
+1075 |                     working_capital -= actual_cost  # Trừ chi phí mua trực tiếp từ working_capital
+1076 |                     settlement_date = date + pd.Timedelta(days=2)  # Dùng để tính toán, nhưng không thêm vào pending_settlements
+1077 | 
+1078 |                     current_portfolio[ticker] = {
+1079 |                         'shares': actual_shares_to_buy,
+1080 |                         'entry_price': entry_price,
+1081 |                         'avg_cost': entry_price,
+1082 |                         'tp': entry_price + (atr_mult * row['atr_14']),
+1083 |                         'sl': entry_price - (atr_mult * row['atr_14']),
+1084 |                         'trailing_sl': entry_price * (1 - trailing_stop_pct),
+1085 |                         'highest_price': entry_price,
+1086 |                         'end_date': date + pd.Timedelta(days=max_hold_days),
+1087 |                         'entry_date': date,
+1088 |                         'pyramid_count': 0
+1089 |                     }
+1090 | 
+1091 |                     executed_count += 1
+1092 |                     if executed_count >= slots_available:
+1093 |                         break
+1094 | 
+1095 |         # 8. Calculate portfolio value and drawdown check
+1096 |         stocks_value = 0
+1097 |         for ticker, pos in current_portfolio.items():
+1098 |             if ticker in pivoted_close.columns:
+1099 |                 current_price = pivoted_close.at[date, ticker]
+1100 |                 price_to_use = current_price if not pd.isna(current_price) else pos['entry_price']
+1101 |                 stocks_value += pos['shares'] * price_to_use
+1102 | 
+1103 |         pending_cash_value = sum(amount for _, amount in pending_settlements)
+1104 |         total_value = max(working_capital + stocks_value + pending_cash_value + reserve_capital + profit_vault, 0)
+1105 |         portfolio_values[i] = total_value
+1106 | 
+1107 |         if i % 10 == 0 or i == len(all_dates) - 1:
+1108 |             portfolio_history.append({'date': date, 'Portfolio Value': total_value})
+1109 | 
+1110 |     print(f"Main loop completed in {time.time() - loop_start:.2f}s")
+1111 | 
+1112 |     # Finalize portfolio history
+1113 |     df_history = pd.DataFrame(portfolio_history).set_index('date')
+1114 |     if len(df_history) < len(all_dates):
+1115 |         full_dates = pd.DataFrame(index=all_dates, data={'Portfolio Value': portfolio_values})
+1116 |         df_history = full_dates
+1117 | 
+1118 |     try:
+1119 |         log_portfolio_to_csv(portfolio_history)
+1120 |         log_trades_to_csv(trades)
+1121 |         log_drawdown_to_csv(df_history)
+1122 |     except Exception as e:
+1123 |         print(f"Warning: Logging failed - {e}")
+1124 | 
+1125 |     try:
+1126 |         enhanced_metrics = calculate_enhanced_metrics(df_history, trades)
+1127 |     except Exception as e:
+1128 |         print(f"Warning: Metrics calculation failed - {e}")
+1129 |         enhanced_metrics = {}
+1130 | 
+1131 |     total_time = time.time() - start_time
+1132 |     print(f"Total backtest time: {total_time:.2f} seconds")
+1133 | 
+1134 |     if enhanced_metrics:
+1135 |         print(f"Enhanced Metrics: Total Return={enhanced_metrics.get('Total Return', 0):.2%}, "
+1136 |               f"CAGR={enhanced_metrics.get('CAGR', 0):.2%}, "
+1137 |               f"Sharpe={enhanced_metrics.get('Sharpe Ratio', 0):.2f}, "
+1138 |               f"Max DD={enhanced_metrics.get('Max Drawdown', 0):.2%}, "
+1139 |               f"Win Rate={enhanced_metrics.get('Win Rate', 0):.2%}, "
+1140 |               f"Avg Hold={enhanced_metrics.get('Avg Holding Days', 0):.1f} days")
+1141 | 
+1142 |     # In danh mục cuối cùng
+1143 |     last_date = all_dates[-1]
+1144 |     print_final_portfolio(current_portfolio, pivoted_close, last_date, working_capital, reserve_capital, profit_vault, pending_settlements, trades)
+1145 | 
+1146 |     return df_history, enhanced_metrics, trades
+1147 | 
+1148 | def backtest_engine_v12(
+1149 |     data,
+1150 |     screener_func,
+1151 |     start_date_str,
+1152 |     end_date_str,
+1153 |     initial_capital,
+1154 |     base_capital,
+1155 |     commission_buy=0.001,
+1156 |     commission_sell_base=0.001,
+1157 |     tax_sell=0.001,
+1158 |     trade_limit_pct=0.01,
+1159 |     max_investment_per_trade_pct=0.10,
+1160 |     max_open_positions=8,
+1161 |     min_volume_ma20=200000,
+1162 |     lot_size=100,
+1163 |     vol_window=20,
+1164 |     liquidity_threshold=0.1,
+1165 |     entry_mode='close',
+1166 |     atr_multiplier=2.0,
+1167 |     trailing_stop_pct=0.05,
+1168 |     partial_profit_pct=0.4,
+1169 |     min_holding_days=2,
+1170 |     pyramid_limit=1
+1171 | ):
+1172 |     start_time = time.time()
+1173 |     print("Starting dynamic backtest V12 with market phase adaptation...")
+1174 |     print(f"Entry mode: {entry_mode}")
+1175 | 
+1176 |     # --- DATA PREPARATION ---
+1177 |     backtest_data = data.copy()
+1178 |     if 'adj_factor' in backtest_data.columns:
+1179 |         backtest_data['close'] *= backtest_data['adj_factor']
+1180 | 
+1181 |     backtest_data = backtest_data[
+1182 |         (backtest_data.index >= start_date_str) &
+1183 |         (backtest_data.index <= end_date_str)
+1184 |     ].copy()
+1185 | 
+1186 |     print(f"Data preparation completed in {time.time() - start_time:.2f}s")
+1187 | 
+1188 |     # Create pivot tables
+1189 |     pivot_start = time.time()
+1190 |     pivot_tables = create_pivot_tables_batch(backtest_data)
+1191 |     print(f"Pivot tables created in {time.time() - pivot_start:.2f}s")
+1192 | 
+1193 |     pivoted_close = pivot_tables.get('pivoted_close')
+1194 |     pivoted_open = pivot_tables.get('pivoted_open')
+1195 |     pivoted_high = pivot_tables.get('pivoted_high')
+1196 |     pivoted_low = pivot_tables.get('pivoted_low')
+1197 |     pivoted_boll_width = pivot_tables.get('pivoted_boll_width')
+1198 |     pivoted_boll_upper = pivot_tables.get('pivoted_boll_upper')
+1199 |     pivoted_boll_lower = pivot_tables.get('pivoted_boll_lower')
+1200 |     pivoted_volume_ma20 = pivot_tables.get('pivoted_volume_ma20')
+1201 |     pivoted_volume_spike = pivot_tables.get('pivoted_volume_spike')
+1202 |     pivoted_sma_5 = pivot_tables.get('pivoted_sma_5')
+1203 |     pivoted_volume = pivot_tables.get('pivoted_volume')
+1204 |     pivoted_rsi = pivot_tables.get('pivoted_rsi_14')
+1205 |     pivoted_mfi = pivot_tables.get('pivoted_mfi_14')
+1206 |     pivoted_obv = pivot_tables.get('pivoted_obv')
+1207 |     pivoted_sma_50 = pivot_tables.get('pivoted_sma_50')
+1208 |     pivoted_macd = pivot_tables.get('pivoted_macd')
+1209 | 
+1210 |     # Pre-calculate market volatility
+1211 |     vol_spike_series = calculate_market_volatility(backtest_data, vol_window)
+1212 | 
+1213 |     # --- BACKTEST VARIABLES ---
+1214 |     # Remove profit_vault to allow full reinvestment of profits
+1215 |     working_capital = initial_capital  # Start with full initial capital, no separation into profit_vault
+1216 |     reserve_capital = 0
+1217 |     portfolio_history = []
+1218 |     current_portfolio = {}
+1219 |     pending_settlements = deque()  # Chỉ chứa tiền bán chờ thanh toán
+1220 |     trades = []
+1221 | 
+1222 |     all_dates = pivoted_close.index.tolist()
+1223 |     total_dates = len(all_dates)
+1224 |     date_to_idx = {date: idx for idx, date in enumerate(all_dates)}
+1225 |     portfolio_values = np.zeros(total_dates)
+1226 | 
+1227 |     print(f"Starting main backtest loop for {total_dates} dates...")
+1228 |     loop_start = time.time()
+1229 | 
+1230 |     # --- MAIN BACKTEST LOOP ---
+1231 |     for i, date in enumerate(all_dates):
+1232 |         if i % 500 == 0:
+1233 |             print(f"Processing date {i+1}/{total_dates} ({(i+1)/total_dates*100:.1f}%)")
+1234 | 
+1235 |         # 1. Settle pending settlements (chỉ tiền bán)
+1236 |         while pending_settlements and pending_settlements[0][0] <= date:
+1237 |             _, amount = pending_settlements.popleft()
+1238 |             working_capital += amount
+1239 | 
+1240 |         # Tính total_cost_of_stocks (giá vốn của cổ phiếu)
+1241 |         total_cost_of_stocks = sum(pos['shares'] * pos['avg_cost'] * (1 + commission_buy) for pos in current_portfolio.values())
+1242 |         pending_cash_value = sum(amount for _, amount in pending_settlements)
+1243 | 
+1244 |         # Remove target_working_capital logic since profit_vault is removed
+1245 |         # All profits are reinvested directly into working_capital
+1246 | 
+1247 |         # 2. Market phase detection
+1248 |         market_row = backtest_data.loc[date].iloc[0] if date in backtest_data.index else None
+1249 |         if market_row is not None:
+1250 |             market_close = market_row['market_close']
+1251 |             market_ma50 = market_row['market_MA50']
+1252 |             market_ma200 = market_row['market_MA200']
+1253 |             market_rsi = market_row['market_rsi']
+1254 |             market_adx = market_row['market_adx']
+1255 |             market_boll_width = market_row['market_boll_width']
+1256 | 
+1257 |         is_bull = (market_close > market_ma50) and (market_close > market_ma200) and (market_rsi > 50)
+1258 |         is_sideway = (market_adx < 20) and (market_boll_width < 0.4) and (40 <= market_rsi <= 60)
+1259 |         is_bear = (market_close < market_ma200) or (market_rsi < 30)
+1260 | 
+1261 |         market_phase = 'bull' if is_bull else 'sideway' if is_sideway else 'bear'
+1262 |         position_multiplier = 1.2 if is_bull else 0.5 if is_sideway else 0.0  # Tăng trong bull, giảm trong sideway
+1263 |         max_hold_days = 45 if is_bull else 20 if is_sideway else 15  # Dynamic hold days
+1264 |         loss_exit_threshold = -0.10 if is_bull else -0.03 if is_sideway else -0.12  # Nới lỏng trong bull, chặt trong sideway
+1265 |         atr_mult = 2.0 if is_bull else 1.2 if is_sideway else 2.2  # Tăng ATR trong bull cho SL/TP rộng hơn
+1266 |         pyramid_limit_phase = 2 if is_bull else 1  # Tăng pyramid trong bull
+1267 | 
+1268 |         # 3. Portfolio management with enhanced exit logic
+1269 |         positions_to_remove = []
+1270 |         for ticker, pos in current_portfolio.items():
+1271 |             if ticker not in pivoted_close.columns:
+1272 |                 continue
+1273 | 
+1274 |             open_val = pivoted_open.at[date, ticker]
+1275 |             high_val = pivoted_high.at[date, ticker]
+1276 |             low_val = pivoted_low.at[date, ticker]
+1277 |             close_val = pivoted_close.at[date, ticker]
+1278 |             rsi_val = pivoted_rsi.at[date, ticker] if pivoted_rsi is not None else None
+1279 |             mfi_val = pivoted_mfi.at[date, ticker] if pivoted_mfi is not None else None
+1280 |             obv_val = pivoted_obv.at[date, ticker] if pivoted_obv is not None else None
+1281 |             sma5_val = pivoted_sma_5.at[date, ticker] if pivoted_sma_5 is not None else close_val
+1282 |             sma50_val = pivoted_sma_50.at[date, ticker] if pivoted_sma_50 is not None else close_val
+1283 | 
+1284 |             if pd.isna(close_val):
+1285 |                 continue
+1286 | 
+1287 |             holding_days = (date - pos['entry_date']).days
+1288 |             tp = pos['tp']
+1289 |             sl = pos['sl']
+1290 |             trailing_sl = pos.get('trailing_sl', pos['entry_price'] * (1 - trailing_stop_pct))
+1291 |             highest_price = pos.get('highest_price', pos['entry_price'])
+1292 | 
+1293 |             # Update trailing stop
+1294 |             if high_val > highest_price:
+1295 |                 highest_price = high_val
+1296 |                 trailing_sl = highest_price * (1 - trailing_stop_pct)
+1297 |                 pos['highest_price'] = highest_price
+1298 |                 pos['trailing_sl'] = trailing_sl
+1299 | 
+1300 |             # Adjust TP/SL for sideway
+1301 |             if market_phase == 'sideway' and pivoted_boll_upper is not None and pivoted_boll_lower is not None:
+1302 |                 tp = min(tp, pivoted_boll_upper.at[date, ticker]) if not pd.isna(pivoted_boll_upper.at[date, ticker]) else tp
+1303 |                 sl = max(sl, pivoted_boll_lower.at[date, ticker]) if not pd.isna(pivoted_boll_lower.at[date, ticker]) else sl
+1304 | 
+1305 |             trigger_tp = False
+1306 |             trigger_sl = False
+1307 |             exit_price = None
+1308 |             partial_exit = False
+1309 |             exit_type = "Normal"
+1310 | 
+1311 |             # Check gap at open
+1312 |             if not pd.isna(open_val) and holding_days >= min_holding_days:
+1313 |                 if open_val >= tp:
+1314 |                     trigger_tp = True
+1315 |                     exit_price = open_val
+1316 |                     partial_exit = True
+1317 |                     exit_type = "Pyramid" if pos.get('pyramid_count', 0) > 0 else "Normal"
+1318 |                 elif open_val <= min(sl, trailing_sl):
+1319 |                     trigger_sl = True
+1320 |                     exit_price = open_val
+1321 |                     exit_type = "Normal"
+1322 | 
+1323 |             # Check intraday
+1324 |             if exit_price is None and holding_days >= min_holding_days:
+1325 |                 if high_val >= tp:
+1326 |                     trigger_tp = True
+1327 |                     exit_price = close_val
+1328 |                     partial_exit = True
+1329 |                     exit_type = "Pyramid" if pos.get('pyramid_count', 0) > 0 else "Normal"
+1330 |                 elif low_val <= min(sl, trailing_sl):
+1331 |                     trigger_sl = True
+1332 |                     exit_price = close_val
+1333 |                     exit_type = "Normal"
+1334 | 
+1335 |             # Check weakness and market conditions
+1336 |             prev_obv = pivoted_obv.at[all_dates[max(0, i-1)], ticker] if i > 0 and pivoted_obv is not None else obv_val
+1337 |             is_weak = (
+1338 |                 rsi_val is not None and rsi_val < 30 and
+1339 |                 mfi_val is not None and mfi_val < 20 and
+1340 |                 obv_val is not None and obv_val < prev_obv
+1341 |             )
+1342 |             current_profit_pct = (close_val / pos['entry_price'] - 1)
+1343 |             trigger_end = (holding_days >= max_hold_days or is_weak or
+1344 |                           (market_phase == 'bear' and current_profit_pct < loss_exit_threshold) or
+1345 |                           (market_phase == 'sideway' and current_profit_pct < -0.03))
+1346 |             extended_hold = holding_days >= 50 and current_profit_pct > 0.08 and market_phase == 'bull'
+1347 |             if extended_hold:
+1348 |                 trigger_end = False
+1349 | 
+1350 |             # Thêm check momentum cho early exit trong sideway
+1351 |             if market_phase == 'sideway' and sma5_val < sma50_val and current_profit_pct < 0.01:
+1352 |                 trigger_end = True
+1353 |                 exit_type = "Momentum Loss"
+1354 | 
+1355 |             # Pyramiding Logic (chỉ áp dụng trong bull market)
+1356 |             pyramid_triggered = False
+1357 |             if (not trigger_tp and not trigger_sl and not trigger_end and
+1358 |                 market_phase == 'bull' and
+1359 |                 holding_days >= 2 and holding_days <= 10 and
+1360 |                 current_profit_pct > 0.05 and current_profit_pct < 0.10 and
+1361 |                 pos.get('pyramid_count', 0) < pyramid_limit_phase):  # Sử dụng pyramid_limit_phase
+1362 | 
+1363 |                 add_shares = int(pos['shares'] * 0.2 / lot_size) * lot_size
+1364 |                 add_cost = add_shares * close_val * (1 + commission_buy)
+1365 |                 if working_capital >= add_cost:
+1366 |                     new_avg_cost = (pos['shares'] * pos['avg_cost'] + add_shares * close_val) / (pos['shares'] + add_shares)
+1367 |                     pos['avg_cost'] = new_avg_cost
+1368 |                     pos['shares'] += add_shares
+1369 |                     pos['pyramid_count'] = pos.get('pyramid_count', 0) + 1
+1370 |                     pos['tp'] = close_val * 1.12
+1371 |                     pos['trailing_sl'] = close_val * (1 - trailing_stop_pct * 0.7)
+1372 |                     pyramid_triggered = True
+1373 |                     working_capital -= add_cost  # Trừ trực tiếp từ working_capital
+1374 |                     print(f"Pyramiding triggered for {ticker}: Added {add_shares} shares at {close_val}")
+1375 | 
+1376 |             # Exit logic
+1377 |             if (trigger_tp or trigger_sl or trigger_end) and holding_days >= min_holding_days and not pyramid_triggered:
+1378 |                 if trigger_end and exit_price is None:
+1379 |                     exit_price = close_val
+1380 |                     exit_type = "Pyramid" if pos.get('pyramid_count', 0) > 0 else "Normal"
+1381 | 
+1382 |                 volume_today = pivoted_volume.at[date, ticker] if ticker in pivoted_volume.columns else 0
+1383 |                 shares = pos['shares']
+1384 |                 shares_to_sell = int(shares * partial_profit_pct / lot_size) * lot_size if trigger_tp and partial_exit else shares
+1385 |                 can_sell_today = (not pd.isna(volume_today) and volume_today > 0 and
+1386 |                                 shares_to_sell <= volume_today * liquidity_threshold)
+1387 | 
+1388 |                 use_exit_price = exit_price
+1389 |                 exit_date = date
+1390 |                 if not can_sell_today:
+1391 |                     next_idx = i
+1392 |                     while next_idx < total_dates - 1:
+1393 |                         next_idx += 1
+1394 |                         next_date = all_dates[next_idx]
+1395 |                         if (next_date - pos['entry_date']).days >= min_holding_days:
+1396 |                             next_open_price = pivoted_open.at[next_date, ticker]
+1397 |                             if not pd.isna(next_open_price):
+1398 |                                 use_exit_price = next_open_price
+1399 |                                 exit_date = next_date
+1400 |                                 break
+1401 |                     else:
+1402 |                         use_exit_price = close_val
+1403 |                         exit_date = date
+1404 | 
+1405 |                 # Calculate proceeds
+1406 |                 gross_proceeds = use_exit_price * shares_to_sell
+1407 |                 net_proceeds = gross_proceeds - (gross_proceeds * (commission_sell_base + tax_sell))
+1408 |                 if net_proceeds <= 0:  # Không ghi nhận nếu âm
+1409 |                     continue
+1410 |                 settlement_idx = date_to_idx.get(exit_date, i) + 2
+1411 |                 settlement_date = all_dates[min(settlement_idx, total_dates - 1)]
+1412 |                 pending_settlements.append((settlement_date, net_proceeds))
+1413 | 
+1414 |                 holding_days_exit = (exit_date - pos['entry_date']).days
+1415 |                 if holding_days_exit < min_holding_days:
+1416 |                     continue
+1417 | 
+1418 |                 # Record trade
+1419 |                 profit = net_proceeds - (shares_to_sell * pos['avg_cost'] * (1 + commission_buy))
+1420 |                 trades.append({
+1421 |                     'ticker': ticker,
+1422 |                     'entry_date': pos['entry_date'],
+1423 |                     'exit_date': exit_date,
+1424 |                     'entry_price': pos['entry_price'],
+1425 |                     'exit_price': use_exit_price,
+1426 |                     'shares': shares_to_sell,
+1427 |                     'profit': profit,
+1428 |                     'holding_days': holding_days_exit,
+1429 |                     'exit_type': exit_type
+1430 |                 })
+1431 | 
+1432 |                 if partial_exit and trigger_tp:
+1433 |                     pos['shares'] -= shares_to_sell
+1434 |                     pos['tp'] = use_exit_price * 1.15
+1435 |                     pos['sl'] = max(pos['sl'], use_exit_price * (1 - trailing_stop_pct * 1.2))
+1436 |                 else:
+1437 |                     positions_to_remove.append(ticker)
+1438 | 
+1439 |         for ticker in positions_to_remove:
+1440 |             if ticker in current_portfolio:
+1441 |                 del current_portfolio[ticker]
+1442 | 
+1443 |         # 5. Dynamic rebalancing - Removed profit_vault logic, all capital is working
+1444 |         # No target_working_capital since profit_vault is eliminated
+1445 | 
+1446 |         # 6. Entry logic
+1447 |         date_mask = backtest_data.index == date
+1448 |         today_data_unfiltered = backtest_data[date_mask]
+1449 | 
+1450 |         if not today_data_unfiltered.empty:
+1451 |             watchlist = screener_func(today_data_unfiltered, min_volume_ma20)
+1452 |             print(f"Watchlist {date}: {watchlist}")
+1453 | 
+1454 |         if entry_mode == 'close' and watchlist and len(current_portfolio) < max_open_positions and working_capital > 0:
+1455 |             ticker_mask = backtest_data['ticker'].isin(watchlist)
+1456 |             today_data = backtest_data[date_mask & ticker_mask]
+1457 | 
+1458 |             if not today_data.empty:
+1459 |                 candidates = today_data
+1460 |                 if len(watchlist) > 1 and 'score' in candidates.columns:
+1461 |                     candidates = candidates.sort_values('score', ascending=False)
+1462 | 
+1463 |                 slots_available = int((max_open_positions - len(current_portfolio)) * position_multiplier)
+1464 |                 if market_phase == 'bear':
+1465 |                     slots_available = max(1, slots_available // 2)
+1466 |                 allocation_multiplier = 1.1 if slots_available > 2 else 1.0
+1467 |                 max_investment = working_capital * max_investment_per_trade_pct  # Use full working capital
+1468 | 
+1469 |                 executed_count = 0
+1470 |                 for idx, row in candidates.head(slots_available).iterrows():
+1471 |                     ticker = row['ticker']
+1472 |                     if ticker in current_portfolio:
+1473 |                         continue
+1474 | 
+1475 |                     entry_price = row['close']
+1476 |                     if entry_price <= 0:
+1477 |                         continue
+1478 | 
+1479 |                     investment_per_stock = min(
+1480 |                         (working_capital / slots_available) * position_multiplier * allocation_multiplier,
+1481 |                         max_investment
+1482 |                     )
+1483 | 
+1484 |                     intended_shares = (investment_per_stock / (1 + commission_buy)) / entry_price
+1485 |                     max_shares_by_volume = row['volume_ma20'] * trade_limit_pct
+1486 |                     actual_shares_to_buy = min(intended_shares, max_shares_by_volume)
+1487 |                     actual_shares_to_buy = int(actual_shares_to_buy / lot_size) * lot_size
+1488 | 
+1489 |                     if actual_shares_to_buy < lot_size:
+1490 |                         continue
+1491 | 
+1492 |                     actual_cost = actual_shares_to_buy * entry_price * (1 + commission_buy)
+1493 | 
+1494 |                     if actual_shares_to_buy * entry_price > row['volume'] * row['close'] * liquidity_threshold:
+1495 |                         continue
+1496 | 
+1497 |                     projected_capital = working_capital - actual_cost
+1498 |                     if projected_capital < 0 or working_capital == 0:
+1499 |                         continue
+1500 | 
+1501 |                     working_capital -= actual_cost  # Trừ chi phí mua trực tiếp từ working_capital
+1502 |                     settlement_date = date + pd.Timedelta(days=2)  # Dùng để tính toán, nhưng không thêm vào pending_settlements
+1503 | 
+1504 |                     current_portfolio[ticker] = {
+1505 |                         'shares': actual_shares_to_buy,
+1506 |                         'entry_price': entry_price,
+1507 |                         'avg_cost': entry_price,
+1508 |                         'tp': entry_price + (atr_mult * row['atr_14']),
+1509 |                         'sl': entry_price - (atr_mult * row['atr_14']),
+1510 |                         'trailing_sl': entry_price * (1 - trailing_stop_pct),
+1511 |                         'highest_price': entry_price,
+1512 |                         'end_date': date + pd.Timedelta(days=max_hold_days),
+1513 |                         'entry_date': date,
+1514 |                         'pyramid_count': 0
+1515 |                     }
+1516 | 
+1517 |                     executed_count += 1
+1518 |                     if executed_count >= slots_available:
+1519 |                         break
+1520 | 
+1521 |         # 8. Calculate portfolio value and drawdown check
+1522 |         stocks_value = 0
+1523 |         for ticker, pos in current_portfolio.items():
+1524 |             if ticker in pivoted_close.columns:
+1525 |                 current_price = pivoted_close.at[date, ticker]
+1526 |                 price_to_use = current_price if not pd.isna(current_price) else pos['entry_price']
+1527 |                 stocks_value += pos['shares'] * price_to_use
+1528 | 
+1529 |         pending_cash_value = sum(amount for _, amount in pending_settlements)
+1530 |         total_value = max(working_capital + stocks_value + pending_cash_value + reserve_capital, 0)
+1531 |         portfolio_values[i] = total_value
+1532 | 
+1533 |         if i % 10 == 0 or i == len(all_dates) - 1:
+1534 |             portfolio_history.append({'date': date, 'Portfolio Value': total_value})
+1535 | 
+1536 |     print(f"Main loop completed in {time.time() - loop_start:.2f}s")
+1537 | 
+1538 |     # Finalize portfolio history
+1539 |     df_history = pd.DataFrame(portfolio_history).set_index('date')
+1540 |     if len(df_history) < len(all_dates):
+1541 |         full_dates = pd.DataFrame(index=all_dates, data={'Portfolio Value': portfolio_values})
+1542 |         df_history = full_dates
+1543 | 
+1544 |     try:
+1545 |         log_portfolio_to_csv(portfolio_history)
+1546 |         log_trades_to_csv(trades)
+1547 |         log_drawdown_to_csv(df_history)
+1548 |     except Exception as e:
+1549 |         print(f"Warning: Logging failed - {e}")
+1550 | 
+1551 |     try:
+1552 |         enhanced_metrics = calculate_enhanced_metrics(df_history, trades)
+1553 |     except Exception as e:
+1554 |         print(f"Warning: Metrics calculation failed - {e}")
+1555 |         enhanced_metrics = {}
+1556 | 
+1557 |     total_time = time.time() - start_time
+1558 |     print(f"Total backtest time: {total_time:.2f} seconds")
+1559 | 
+1560 |     if enhanced_metrics:
+1561 |         print(f"Enhanced Metrics: Total Return={enhanced_metrics.get('Total Return', 0):.2%}, "
+1562 |               f"CAGR={enhanced_metrics.get('CAGR', 0):.2%}, "
+1563 |               f"Sharpe={enhanced_metrics.get('Sharpe Ratio', 0):.2f}, "
+1564 |               f"Max DD={enhanced_metrics.get('Max Drawdown', 0):.2%}, "
+1565 |               f"Win Rate={enhanced_metrics.get('Win Rate', 0):.2%}, "
+1566 |               f"Avg Hold={enhanced_metrics.get('Avg Holding Days', 0):.1f} days")
+1567 | 
+1568 |     # In danh mục cuối cùng
+1569 |     last_date = all_dates[-1]
+1570 |     print_final_portfolio(current_portfolio, pivoted_close, last_date, working_capital, reserve_capital, 0, pending_settlements, trades)
+1571 | 
+1572 |     return df_history, enhanced_metrics, trades
+1573 | 
+1574 | """# 3. test"""
+1575 | 
+1576 | # ===================================================================
+1577 | # 3. TẢI DỮ LIỆU
+1578 | # ===================================================================
+1579 | DATA_FILE_PATH = r"E:\Document\Tao\Study\Data Science Talent Competition 2025\problem2\solution\data-v2.parquet"
+1580 | 
+1581 | if not os.path.exists(DATA_FILE_PATH):
+1582 |     print(f"Lỗi: Không tìm thấy file dữ liệu '{DATA_FILE_PATH}'.")
+1583 | else:
+1584 |     df = pd.read_parquet(DATA_FILE_PATH)
+1585 |     if 'time' in df.columns:
+1586 |         df['time'] = pd.to_datetime(df['time'])
+1587 |         df = df.set_index('time').sort_index()
+1588 | 
+1589 |     print(f"Tải dữ liệu thành công. Dữ liệu kéo dài từ {df.index.min().date()} đến {df.index.max().date()}.")
+1590 |     print(f"Tổng số bản ghi: {len(df):,}")
+1591 | 
+1592 | """# 3.5. test"""
+1593 | 
+1594 | # ===================================================================
+1595 | # 4. THIẾT LẬP & THỰC THI BACKTEST
+1596 | # ===================================================================
+1597 | TEST_START_DATE = '2020-01-01'
+1598 | TEST_END_DATE = '2025-09-20'
+1599 | INITIAL_CAPITAL = 3_000_000_000
+1600 | BASE_CAPITAL = 3_000_000_000
+1601 | 
+1602 | print(f"--- Bắt đầu chạy Backtest V9 từ {TEST_START_DATE} đến {TEST_END_DATE} ---")
+1603 | print("Đang tính toán Benchmark: VN-Index...")
+1604 | benchmark_performance = calculate_benchmark(df, TEST_START_DATE, TEST_END_DATE, INITIAL_CAPITAL)
+1605 | metrics_benchmark = calculate_metrics(benchmark_performance)
+1606 | 
+1607 | print("Đang chạy Backtest V9...")
+1608 | # Tính toán trước các chỉ báo
+1609 | df = precompute_technical_indicators_vectorized(df)
+1610 | performance_v9, enhanced_metrics_v9, trades = backtest_engine_v12(
+1611 |     df,
+1612 |     apply_enhanced_screener_v12_sideway_soft,
+1613 |     TEST_START_DATE,
+1614 |     TEST_END_DATE,
+1615 |     INITIAL_CAPITAL,
+1616 |     BASE_CAPITAL,
+1617 |     commission_buy=0.001,
+1618 |     commission_sell_base=0.001,
+1619 |     tax_sell=0.001,
+1620 |     trade_limit_pct=0.11,
+1621 |     max_investment_per_trade_pct=0.15,
+1622 |     max_open_positions=8,
+1623 |     min_volume_ma20=200000,
+1624 |     lot_size=100,
+1625 |     vol_window=20,
+1626 |     liquidity_threshold=0.1,
+1627 |     entry_mode='close',
+1628 |     atr_multiplier=1.5,
+1629 |     trailing_stop_pct=0.05,
+1630 |     partial_profit_pct=0.4,
+1631 |     min_holding_days=3,
+1632 |     pyramid_limit=1
+1633 | )
+1634 | 
+1635 | """# 4. Kết quả"""
+1636 | 
+1637 | # ===================================================================
+1638 | # 5. PHÂN TÍCH KẾT QUẢ
+1639 | # ===================================================================
+1640 | if not enhanced_metrics_v9:
+1641 |     print("Không có giao dịch nào được thực hiện. Vui lòng kiểm tra dữ liệu hoặc điều kiện screener.")
+1642 | else:
+1643 |     metrics_df = pd.DataFrame({
+1644 |         'Strategy': ['VN-Index Benchmark', 'V9'],
+1645 |         'Total Return': [f"{metrics_benchmark['Total Return']:.2%}", f"{enhanced_metrics_v9['Total Return']:.2%}"],
+1646 |         'Sharpe Ratio': [f"{metrics_benchmark['Sharpe Ratio (Annualized)']:.2f}", f"{enhanced_metrics_v9['Sharpe Ratio']:.2f}"],
+1647 |         'Max Drawdown': [f"{metrics_benchmark['Max Drawdown']:.2%}", f"{enhanced_metrics_v9['Max Drawdown']:.2%}"],
+1648 |         'Calmar Ratio': [f"{metrics_benchmark['Calmar Ratio']:.2f}", f"{enhanced_metrics_v9['Calmar Ratio']:.2f}"],
+1649 |         'Win Rate': ['N/A', f"{enhanced_metrics_v9['Win Rate']:.2%}"],
+1650 |         'Avg Holding Days': ['N/A', f"{enhanced_metrics_v9['Avg Holding Days']:.1f}"],
+1651 |         'Profit Factor': ['N/A', f"{enhanced_metrics_v9['Profit Factor']:.2f}"],
+1652 |         'Max Consec Losses': ['N/A', enhanced_metrics_v9['Max Consec Losses']]
+1653 |     })
+1654 |     print("\n--- Bảng So sánh Metrics Mở Rộng ---")
+1655 |     print(metrics_df.to_string(index=False))
+1656 | 
+1657 |     # Trực quan hóa
+1658 |     plt.style.use('seaborn-v0_8-whitegrid')
+1659 |     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(20, 15), height_ratios=[3, 1, 1])
+1660 | 
+1661 |     # Equity curve
+1662 |     ax1.plot(benchmark_performance.index, benchmark_performance,
+1663 |              label=f"Benchmark: VN-Index ({metrics_benchmark['Total Return']:.2%})",
+1664 |              linestyle=':', color='black', alpha=0.7)
+1665 |     ax1.plot(performance_v9.index, performance_v9['Portfolio Value'],
+1666 |              label=f"V9 ({enhanced_metrics_v9['Total Return']:.2%})",
+1667 |              linewidth=3.5, color='lightblue', alpha=0.9)
+1668 |     ax1.set_title(f"So sánh Hiệu suất V9 vs Benchmark ({TEST_START_DATE} - {TEST_END_DATE})", fontsize=20)
+1669 |     ax1.set_ylabel("Giá trị Danh mục (VND)", fontsize=16)
+1670 |     ax1.legend(fontsize=14, loc='upper left')
+1671 |     ax1.grid(True, alpha=0.3)
+1672 | 
+1673 |     # Drawdown
+1674 |     drawdown_v9 = (performance_v9['Portfolio Value'] - performance_v9['Portfolio Value'].cummax()) / performance_v9['Portfolio Value'].cummax()
+1675 |     drawdown_bench = (benchmark_performance - benchmark_performance.cummax()) / benchmark_performance.cummax()
+1676 |     ax2.fill_between(performance_v9.index, drawdown_v9, 0, color='lightblue', alpha=0.7, label='V9')
+1677 |     ax2.fill_between(benchmark_performance.index, drawdown_bench, 0, color='gray', alpha=0.7, label='Benchmark')
+1678 |     ax2.set_title('Drawdown So Sánh', fontsize=16)
+1679 |     ax2.set_ylabel('Drawdown (%)', fontsize=14)
+1680 |     ax2.legend(fontsize=12)
+1681 |     ax2.grid(True, alpha=0.3)
+1682 | 
+1683 |     # Trade return distribution
+1684 |     trade_returns = [(t['exit_price'] - t['entry_price']) / t['entry_price'] * 100 for t in trades]
+1685 |     ax3.hist(trade_returns, bins=50, color='lightblue', edgecolor='black')
+1686 |     ax3.set_title('Phân phối Lợi nhuận Giao dịch (%)', fontsize=16)
+1687 |     ax3.set_xlabel('Lợi nhuận (%)', fontsize=14)
+1688 |     ax3.set_ylabel('Số lượng giao dịch', fontsize=14)
+1689 |     ax3.grid(True, alpha=0.3)
+1690 | 
+1691 |     plt.tight_layout()
+1692 |     plt.show()
+1693 | 
+1694 |     # Monte Carlo Simulation
+1695 |     daily_returns = performance_v9['Portfolio Value'].pct_change().dropna()
+1696 |     simulations = []
+1697 |     for _ in range(1000):
+1698 |         sim_returns = np.random.choice(daily_returns, size=252, replace=True)
+1699 |         sim_path = np.cumprod(1 + sim_returns)
+1700 |         simulations.append(sim_path)
+1701 |     sim_drawdowns = [max((np.max(sim) - sim) / np.max(sim)) for sim in simulations]
+1702 |     print(f"Monte Carlo: 95th Percentile Drawdown = {np.percentile(sim_drawdowns, 95):.2%}")
+1703 | 
+1704 | print("Backtest V9 hoàn tất. Logs đã lưu!")
+1705 | 
+1706 | """V12 có profit vault"""
+1707 | 
+1708 | # ===================================================================
+1709 | # 4. THIẾT LẬP & THỰC THI BACKTEST
+1710 | # ===================================================================
+1711 | TEST_START_DATE = '2020-01-01'
+1712 | TEST_END_DATE = '2025-09-20'
+1713 | INITIAL_CAPITAL = 3_000_000_000
+1714 | BASE_CAPITAL = 3_000_000_000
+1715 | 
+1716 | print(f"--- Bắt đầu chạy Backtest V9 từ {TEST_START_DATE} đến {TEST_END_DATE} ---")
+1717 | print("Đang tính toán Benchmark: VN-Index...")
+1718 | benchmark_performance = calculate_benchmark(df, TEST_START_DATE, TEST_END_DATE, INITIAL_CAPITAL)
+1719 | metrics_benchmark = calculate_metrics(benchmark_performance)
+1720 | 
+1721 | print("Đang chạy Backtest V9...")
+1722 | # Tính toán trước các chỉ báo
+1723 | df = precompute_technical_indicators_vectorized(df)
+1724 | performance_v9, enhanced_metrics_v9, trades = backtest_engine_v12_profit_vault(
+1725 |     df,
+1726 |     apply_enhanced_screener_v12_sideway_soft,
+1727 |     TEST_START_DATE,
+1728 |     TEST_END_DATE,
+1729 |     INITIAL_CAPITAL,
+1730 |     BASE_CAPITAL,
+1731 |     commission_buy=0.001,
+1732 |     commission_sell_base=0.001,
+1733 |     tax_sell=0.001,
+1734 |     trade_limit_pct=0.11,
+1735 |     max_investment_per_trade_pct=0.15,
+1736 |     max_open_positions=8,
+1737 |     min_volume_ma20=200000,
+1738 |     lot_size=100,
+1739 |     vol_window=20,
+1740 |     liquidity_threshold=0.1,
+1741 |     entry_mode='close',
+1742 |     atr_multiplier=1.5,
+1743 |     trailing_stop_pct=0.05,
+1744 |     partial_profit_pct=0.4,
+1745 |     min_holding_days=3,
+1746 |     pyramid_limit=1
+1747 | )
+1748 | 
+1749 | # ===================================================================
+1750 | # 5. PHÂN TÍCH KẾT QUẢ
+1751 | # ===================================================================
+1752 | if not enhanced_metrics_v9:
+1753 |     print("Không có giao dịch nào được thực hiện. Vui lòng kiểm tra dữ liệu hoặc điều kiện screener.")
+1754 | else:
+1755 |     metrics_df = pd.DataFrame({
+1756 |         'Strategy': ['VN-Index Benchmark', 'V9'],
+1757 |         'Total Return': [f"{metrics_benchmark['Total Return']:.2%}", f"{enhanced_metrics_v9['Total Return']:.2%}"],
+1758 |         'Sharpe Ratio': [f"{metrics_benchmark['Sharpe Ratio (Annualized)']:.2f}", f"{enhanced_metrics_v9['Sharpe Ratio']:.2f}"],
+1759 |         'Max Drawdown': [f"{metrics_benchmark['Max Drawdown']:.2%}", f"{enhanced_metrics_v9['Max Drawdown']:.2%}"],
+1760 |         'Calmar Ratio': [f"{metrics_benchmark['Calmar Ratio']:.2f}", f"{enhanced_metrics_v9['Calmar Ratio']:.2f}"],
+1761 |         'Win Rate': ['N/A', f"{enhanced_metrics_v9['Win Rate']:.2%}"],
+1762 |         'Avg Holding Days': ['N/A', f"{enhanced_metrics_v9['Avg Holding Days']:.1f}"],
+1763 |         'Profit Factor': ['N/A', f"{enhanced_metrics_v9['Profit Factor']:.2f}"],
+1764 |         'Max Consec Losses': ['N/A', enhanced_metrics_v9['Max Consec Losses']]
+1765 |     })
+1766 |     print("\n--- Bảng So sánh Metrics Mở Rộng ---")
+1767 |     print(metrics_df.to_string(index=False))
+1768 | 
+1769 |     # Trực quan hóa
+1770 |     plt.style.use('seaborn-v0_8-whitegrid')
+1771 |     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(20, 15), height_ratios=[3, 1, 1])
+1772 | 
+1773 |     # Equity curve
+1774 |     ax1.plot(benchmark_performance.index, benchmark_performance,
+1775 |              label=f"Benchmark: VN-Index ({metrics_benchmark['Total Return']:.2%})",
+1776 |              linestyle=':', color='black', alpha=0.7)
+1777 |     ax1.plot(performance_v9.index, performance_v9['Portfolio Value'],
+1778 |              label=f"V9 ({enhanced_metrics_v9['Total Return']:.2%})",
+1779 |              linewidth=3.5, color='lightblue', alpha=0.9)
+1780 |     ax1.set_title(f"So sánh Hiệu suất V9 vs Benchmark ({TEST_START_DATE} - {TEST_END_DATE})", fontsize=20)
+1781 |     ax1.set_ylabel("Giá trị Danh mục (VND)", fontsize=16)
+1782 |     ax1.legend(fontsize=14, loc='upper left')
+1783 |     ax1.grid(True, alpha=0.3)
+1784 | 
+1785 |     # Drawdown
+1786 |     drawdown_v9 = (performance_v9['Portfolio Value'] - performance_v9['Portfolio Value'].cummax()) / performance_v9['Portfolio Value'].cummax()
+1787 |     drawdown_bench = (benchmark_performance - benchmark_performance.cummax()) / benchmark_performance.cummax()
+1788 |     ax2.fill_between(performance_v9.index, drawdown_v9, 0, color='lightblue', alpha=0.7, label='V9')
+1789 |     ax2.fill_between(benchmark_performance.index, drawdown_bench, 0, color='gray', alpha=0.7, label='Benchmark')
+1790 |     ax2.set_title('Drawdown So Sánh', fontsize=16)
+1791 |     ax2.set_ylabel('Drawdown (%)', fontsize=14)
+1792 |     ax2.legend(fontsize=12)
+1793 |     ax2.grid(True, alpha=0.3)
+1794 | 
+1795 |     # Trade return distribution
+1796 |     trade_returns = [(t['exit_price'] - t['entry_price']) / t['entry_price'] * 100 for t in trades]
+1797 |     ax3.hist(trade_returns, bins=50, color='lightblue', edgecolor='black')
+1798 |     ax3.set_title('Phân phối Lợi nhuận Giao dịch (%)', fontsize=16)
+1799 |     ax3.set_xlabel('Lợi nhuận (%)', fontsize=14)
+1800 |     ax3.set_ylabel('Số lượng giao dịch', fontsize=14)
+1801 |     ax3.grid(True, alpha=0.3)
+1802 | 
+1803 |     plt.tight_layout()
+1804 |     plt.show()
+1805 | 
+1806 |     # Monte Carlo Simulation
+1807 |     daily_returns = performance_v9['Portfolio Value'].pct_change().dropna()
+1808 |     simulations = []
+1809 |     for _ in range(1000):
+1810 |         sim_returns = np.random.choice(daily_returns, size=252, replace=True)
+1811 |         sim_path = np.cumprod(1 + sim_returns)
+1812 |         simulations.append(sim_path)
+1813 |     sim_drawdowns = [max((np.max(sim) - sim) / np.max(sim)) for sim in simulations]
+1814 |     print(f"Monte Carlo: 95th Percentile Drawdown = {np.percentile(sim_drawdowns, 95):.2%}")
+1815 | 
+1816 | print("Backtest V9 hoàn tất. Logs đã lưu!")
+
+
+--------------------------------------------------------------------------------
+/scripts/run_local.sh:
+--------------------------------------------------------------------------------
+1 | #!/usr/bin/env bash
+2 | set -e
+3 | export PYTHONUNBUFFERED=1
+4 | python -m app.main
+5 | 
+
+
+--------------------------------------------------------------------------------
+/strategies/__init__.py:
+--------------------------------------------------------------------------------
+1 | # empty package marker
+2 | 
+
+
+--------------------------------------------------------------------------------
+/strategies/v12_adapter.py:
+--------------------------------------------------------------------------------
+  1 | from __future__ import annotations
+  2 | 
+  3 |     import importlib
+  4 |     import importlib.util
+  5 |     import sys
+  6 |     from pathlib import Path
+  7 |     from types import ModuleType
+  8 |     from typing import Callable, Iterable
+  9 | 
+ 10 |     import numpy as np
+ 11 |     import pandas as pd
+ 12 | 
+ 13 |     MARKET_TICKER_CANDIDATES: tuple[str, ...] = (
+ 14 |         "VNINDEX",
+ 15 |         "VNINDEX-INDEX",
+ 16 |         "^VNINDEX",
+ 17 |     )
+ 18 | 
+ 19 | 
+ 20 |     def _ensure_matplotlib_stub(force: bool = False) -> None:
+ 21 |         if not force and "matplotlib" in sys.modules and "matplotlib.pyplot" in sys.modules:
+ 22 |             return
+ 23 | 
+ 24 |         import types
+ 25 | 
+ 26 |         def _noop(*args, **kwargs):
+ 27 |             return None
+ 28 | 
+ 29 |         class _Axes(types.SimpleNamespace):
+ 30 |             def plot(self, *args, **kwargs):
+ 31 |                 return None
+ 32 | 
+ 33 |             def fill_between(self, *args, **kwargs):
+ 34 |                 return None
+ 35 | 
+ 36 |             def bar(self, *args, **kwargs):
+ 37 |                 return None
+ 38 | 
+ 39 |             def hist(self, *args, **kwargs):
+ 40 |                 return None
+ 41 | 
+ 42 |             def set_title(self, *args, **kwargs):
+ 43 |                 return None
+ 44 | 
+ 45 |             def set_ylabel(self, *args, **kwargs):
+ 46 |                 return None
+ 47 | 
+ 48 |             def set_xlabel(self, *args, **kwargs):
+ 49 |                 return None
+ 50 | 
+ 51 |             def legend(self, *args, **kwargs):
+ 52 |                 return None
+ 53 | 
+ 54 |             def grid(self, *args, **kwargs):
+ 55 |                 return None
+ 56 | 
+ 57 |         def _subplots(*args, **kwargs):
+ 58 |             axes = [_Axes() for _ in range(kwargs.get("nrows", args[0] if args else 1) * kwargs.get("ncols", args[1] if len(args) > 1 else 1))]
+ 59 |             if len(axes) == 1:
+ 60 |                 axes = axes[0]
+ 61 |             return None, axes
+ 62 | 
+ 63 |         matplotlib_module = types.ModuleType("matplotlib")
+ 64 |         pyplot_module = types.ModuleType("pyplot")
+ 65 |         pyplot_module.plot = _noop
+ 66 |         pyplot_module.figure = _noop
+ 67 |         pyplot_module.subplots = _subplots
+ 68 |         pyplot_module.show = _noop
+ 69 |         pyplot_module.close = _noop
+ 70 |         pyplot_module.style = types.SimpleNamespace(use=_noop)
+ 71 |         pyplot_module.fill_between = _noop
+ 72 |         pyplot_module.bar = _noop
+ 73 |         pyplot_module.hist = _noop
+ 74 |         pyplot_module.title = _noop
+ 75 |         pyplot_module.ylabel = _noop
+ 76 |         pyplot_module.xlabel = _noop
+ 77 | 
+ 78 |         matplotlib_module.pyplot = pyplot_module
+ 79 |         sys.modules.setdefault("matplotlib", matplotlib_module)
+ 80 |         sys.modules.setdefault("matplotlib.pyplot", pyplot_module)
+ 81 | 
+ 82 | 
+ 83 |     def _load_v12_from_spec(spec: importlib.machinery.ModuleSpec) -> ModuleType | None:
+ 84 |         if not spec or not spec.loader:
+ 85 |             return None
+ 86 | 
+ 87 |         module = ModuleType(spec.name or "v12_user")
+ 88 |         module.__file__ = spec.origin
+ 89 |         module.__package__ = spec.name.rpartition(".")[0]
+ 90 | 
+ 91 |         try:
+ 92 |             spec.loader.exec_module(module)  # type: ignore[union-attr]
+ 93 |             return module
+ 94 |         except ModuleNotFoundError as exc:
+ 95 |             if exc.name == "matplotlib":
+ 96 |                 _ensure_matplotlib_stub(force=True)
+ 97 |                 try:
+ 98 |                     spec.loader.exec_module(module)  # type: ignore[union-attr]
+ 99 |                     return module
+100 |                 except Exception:
+101 |                     return None
+102 |             return None
+103 |         except Exception:
+104 |             return None
+105 | 
+106 | 
+107 |     def _load_v12_from_file(file_path: Path) -> ModuleType | None:
+108 |         if not file_path.exists():
+109 |             return None
+110 | 
+111 |         try:
+112 |             code = file_path.read_text(encoding="utf-8")
+113 |         except OSError:
+114 |             return None
+115 | 
+116 |         for marker in ("
+117 | # 4.", "
+118 | ## 4."):
+119 |             idx = code.find(marker)
+120 |             if idx != -1:
+121 |                 code = code[:idx]
+122 |                 break
+123 | 
+124 |         module = ModuleType("v12_user")
+125 |         module.__file__ = str(file_path)
+126 |         module.__package__ = ""
+127 | 
+128 |         _ensure_matplotlib_stub()
+129 | 
+130 |         try:
+131 |             exec(compile(code, str(file_path), "exec"), module.__dict__)
+132 |             return module
+133 |         except ModuleNotFoundError as exc:
+134 |             if exc.name == "matplotlib":
+135 |                 _ensure_matplotlib_stub(force=True)
+136 |                 try:
+137 |                     exec(compile(code, str(file_path), "exec"), module.__dict__)
+138 |                     return module
+139 |                 except Exception:
+140 |                     return None
+141 |             return None
+142 |         except Exception:
+143 |             return None
+144 | 
+145 | 
+146 |     def _load_v12() -> ModuleType | None:
+147 |         candidate_modules = (
+148 |             "v12",
+149 |             "strategies.v12",
+150 |             "round_2.v12",
+151 |         )
+152 | 
+153 |         for name in candidate_modules:
+154 |             try:
+155 |                 return importlib.import_module(name)
+156 |             except ModuleNotFoundException:
+157 |                 continue
+158 |             except ModuleNotFoundError as exc:
+159 |                 if exc.name == "matplotlib":
+160 |                     _ensure_matplotlib_stub(force=True)
+161 |                     try:
+162 |                         return importlib.import_module(name)
+163 |                     except Exception:
+164 |                         continue
+165 |                 continue
+166 |             except Exception:
+167 |                 continue
+168 | 
+169 |         base_dir = Path(__file__).resolve().parent.parent
+170 |         candidate_files = (
+171 |             base_dir / "v12.py",
+172 |             base_dir / "round_2" / "v12.py",
+173 |         )
+174 | 
+175 |         for file_path in candidate_files:
+176 |             module = _load_v12_from_file(file_path)
+177 |             if module:
+178 |                 return module
+179 | 
+180 |         return None
+181 | 
+182 | 
+183 |     class ModuleNotFoundException(Exception):
+184 |         pass
+185 | 
+186 | 
+187 |     _v12 = _load_v12()
+188 | 
+189 | 
+190 |     def _ema(series: pd.Series, span: int) -> pd.Series:
+191 |         return series.ewm(span=span, adjust=False).mean()
+192 | 
+193 | 
+194 |     def _calc_rsi(series: pd.Series, window: int = 14) -> pd.Series:
+195 |         delta = series.diff()
+196 |         gain = delta.clip(lower=0)
+197 |         loss = -delta.clip(upper=0)
+198 |         avg_gain = gain.ewm(alpha=1 / window, adjust=False).mean()
+199 |         avg_loss = loss.ewm(alpha=1 / window, adjust=False).mean()
+200 |         rs = avg_gain / avg_loss.replace(0, np.nan)
+201 |         return 100 - (100 / (1 + rs))
+202 | 
+203 | 
+204 |     def _calc_atr(group: pd.DataFrame, window: int = 14) -> pd.Series:
+205 |         close = group["close_adj"]
+206 |         high = group["high"]
+207 |         low = group["low"]
+208 |         prev_close = close.shift(1)
+209 |         tr = pd.concat([
+210 |             high - low,
+211 |             (high - prev_close).abs(),
+212 |             (low - prev_close).abs(),
+213 |         ], axis=1).max(axis=1)
+214 |         return tr.rolling(window, min_periods=window).mean()
+215 | 
+216 | 
+217 |     def _prepare_for_v12(raw: pd.DataFrame) -> pd.DataFrame:
+218 |         if raw.empty:
+219 |             return raw
+220 | 
+221 |         df = raw.copy()
+222 | 
+223 |         time_col = None
+224 |         for col_candidate in ("timestamp", "time", "date"):
+225 |             if col_candidate in df.columns:
+226 |                 time_col = col_candidate
+227 |                 break
+228 | 
+229 |         if time_col is None:
+230 |             raise ValueError("Input dataframe must contain a timestamp/time column")
+231 | 
+232 |         df["time"] = pd.to_datetime(df[time_col])
+233 |         if "ticker" not in df.columns:
+234 |             raise ValueError("Input dataframe must contain a ticker column")
+235 | 
+236 |         df["ticker"] = df["ticker"].astype(str).str.upper().str.strip()
+237 |         df.sort_values(["time", "ticker"], inplace=True)
+238 | 
+239 |         if "adj_factor" not in df.columns:
+240 |             df["adj_factor"] = 1.0
+241 | 
+242 |         df["close_adj"] = df["close"] * df["adj_factor"].astype(float)
+243 | 
+244 |         grouped = df.groupby("ticker", group_keys=False)
+245 | 
+246 |         df["volume_ma20"] = grouped["volume"].transform(lambda s: s.rolling(20, min_periods=20).mean())
+247 |         df["volume_spike"] = df["volume"] / df["volume_ma20"].replace(0, np.nan)
+248 | 
+249 |         df["sma_5"] = grouped["close_adj"].transform(lambda s: s.rolling(5, min_periods=5).mean())
+250 |         df["sma_50"] = grouped["close_adj"].transform(lambda s: s.rolling(50, min_periods=50).mean())
+251 |         df["sma_200"] = grouped["close_adj"].transform(lambda s: s.rolling(200, min_periods=200).mean())
+252 | 
+253 |         df["rsi_14"] = grouped["close_adj"].transform(_calc_rsi)
+254 | 
+255 |         ema12 = grouped["close_adj"].transform(lambda s: _ema(s, 12))
+256 |         ema26 = grouped["close_adj"].transform(lambda s: _ema(s, 26))
+257 |         df["macd"] = ema12 - ema26
+258 |         df["macd_signal"] = grouped["macd"].transform(lambda s: _ema(s, 9))
+259 | 
+260 |         ma20 = grouped["close_adj"].transform(lambda s: s.rolling(20, min_periods=20).mean())
+261 |         std20 = grouped["close_adj"].transform(lambda s: s.rolling(20, min_periods=20).std())
+262 |         df["boll_upper"] = ma20 + 2 * std20
+263 |         df["boll_lower"] = ma20 - 2 * std20
+264 |         df["boll_width"] = (df["boll_upper"] - df["boll_lower"]) / ma20.replace(0, np.nan)
+265 | 
+266 |         df["atr_14"] = grouped.apply(_calc_atr).reset_index(level=0, drop=True)
+267 | 
+268 |         market_mask = df["ticker"].isin(MARKET_TICKER_CANDIDATES)
+269 |         if market_mask.any():
+270 |             market = df[market_mask].copy()
+271 |             market = market.loc[:, ["time", "close_adj", "high", "low"]]
+272 |             market.rename(columns={"close_adj": "market_close"}, inplace=True)
+273 |             market.set_index("time", inplace=True)
+274 | 
+275 |             market_features = pd.DataFrame(index=market.index)
+276 |             market_features["market_close"] = market["market_close"]
+277 |             market_features["market_MA50"] = market["market_close"].rolling(50, min_periods=50).mean()
+278 |             market_features["market_MA200"] = market["market_close"].rolling(200, min_periods=200).mean()
+279 |             market_features["market_rsi"] = _calc_rsi(market["market_close"])
+280 | 
+281 |             sma = market["market_close"].rolling(20, min_periods=20).mean()
+282 |             std = market["market_close"].rolling(20, min_periods=20).std()
+283 |             boll_upper = sma + 2 * std
+284 |             boll_lower = sma - 2 * std
+285 |             market_features["market_boll_width"] = (boll_upper - boll_lower) / sma.replace(0, np.nan)
+286 | 
+287 |             if _v12 and hasattr(_v12, "calculate_adx"):
+288 |                 market_df = pd.DataFrame({
+289 |                     "high": market["high"],
+290 |                     "low": market["low"],
+291 |                     "close": market_features["market_close"],
+292 |                 })
+293 |                 market_features["market_adx"] = _v12.calculate_adx(market_df, n=14)
+294 |             else:
+295 |                 market_features["market_adx"] = np.nan
+296 | 
+297 |             df = df.merge(market_features.reset_index(), on="time", how="left")
+298 |             df = df[~market_mask]
+299 |         else:
+300 |             df["market_close"] = np.nan
+301 |             df["market_MA50"] = np.nan
+302 |             df["market_MA200"] = np.nan
+303 |             df["market_rsi"] = np.nan
+304 |             df["market_boll_width"] = np.nan
+305 |             df["market_adx"] = np.nan
+306 | 
+307 |         df.set_index("time", inplace=True)
+308 |         return df.sort_index()
+309 | 
+310 | 
+311 |     def compute_picks_from_daily_df(df_history: pd.DataFrame) -> list[str]:
+312 |         """Return tickers picked by V12 strategy (or fallback) for the latest session."""
+313 |         if df_history is None or df_history.empty:
+314 |             return []
+315 | 
+316 |         if _v12 and hasattr(_v12, "precompute_technical_indicators_vectorized"):
+317 |             try:
+318 |                 prepared = _prepare_for_v12(df_history)
+319 |                 if prepared.empty:
+320 |                     raise ValueError("Prepared dataframe is empty")
+321 | 
+322 |                 enriched = _v12.precompute_technical_indicators_vectorized(prepared)
+323 |                 latest_index = enriched.index.max()
+324 |                 df_day = enriched.loc[enriched.index == latest_index].copy()
+325 | 
+326 |                 for candidate in ("apply_enhanced_screener_v12", "apply_enhanced_screener_v12_sideway_soft"):
+327 |                     screener: Callable | None = getattr(_v12, candidate, None)
+328 |                     if screener:
+329 |                         picks = list(dict.fromkeys(screener(df_day)))  # preserve order & uniqueness
+330 |                         if picks:
+331 |                             return picks
+332 |                 return []
+333 |             except Exception:
+334 |                 pass
+335 | 
+336 |         import numpy as np  # local import for fallback
+337 | 
+338 |         df_latest = df_history.copy()
+339 |         if "timestamp" in df_latest.columns:
+340 |             max_ts = df_latest["timestamp"].max()
+341 |             df_latest = df_latest[df_latest["timestamp"] == max_ts]
+342 | 
+343 |         picks: list[str] = []
+344 |         grouped = df_latest.groupby("ticker")
+345 |         for tk, g in grouped:
+346 |             if len(g) < 50:
+347 |                 continue
+348 |             closes = g["close"].to_numpy(dtype=float)
+349 |             ma20 = closes[-20:].mean()
+350 |             ma50 = closes[-50:].mean()
+351 |             if closes[-1] > ma20 > ma50:
+352 |                 picks.append(tk)
+353 |         return picks
+354 | 
+355 | 
+356 |     def early_signal_from_15m_bar(prev_bar_row: dict) -> bool:
+357 |         """Intraday early condition (demo). Replace by your real V12 intraday premises."""
+358 |         vol = float(prev_bar_row.get("volume", 0))
+359 |         bu = float(prev_bar_row.get("bu", 0))
+360 |         sd = float(prev_bar_row.get("sd", 0))
+361 |         return vol > 0 and (bu - sd) > 0 and (bu / max(sd, 1)) > 1.2
+362 | 
+
+
+--------------------------------------------------------------------------------
