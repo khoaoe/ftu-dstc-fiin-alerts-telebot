@@ -2,6 +2,7 @@ import time
 import requests
 from .config import CFG
 
+
 class TelegramNotifier:
     def __init__(self, token: str = None, chat_id: str = None, thread_id: int | None = None):
         self.token = token or CFG.bot_token
@@ -13,13 +14,24 @@ class TelegramNotifier:
         payload = {"chat_id": self.chat_id, "text": text, "parse_mode": parse_mode}
         if self.thread_id:
             payload["message_thread_id"] = self.thread_id  # send into specific Topic
+
         last_err = None
         for i in range(retries):
             try:
                 r = requests.post(url, data=payload, timeout=10)
+                if r.status_code == 429:
+                    # Honor Retry-After both in JSON and headers
+                    ra = 1
+                    try:
+                        j = r.json()
+                        ra = int(j.get("parameters", {}).get("retry_after", ra))
+                    except Exception:
+                        ra = int(r.headers.get("Retry-After", ra))
+                    time.sleep(max(1, ra))
+                    continue
                 r.raise_for_status()
                 return r.json()
             except Exception as e:
                 last_err = e
-                time.sleep(backoff * (2**i))
+                time.sleep(backoff * (2 ** i))
         raise last_err
