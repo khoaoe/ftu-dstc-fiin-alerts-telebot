@@ -27,6 +27,10 @@ bash scripts/run_local.sh
 ## Lịch chạy
 
 * EOD: 15:01 (T2–T6)
+* Lịch có thể cấu hình qua `.env`:
+  - `TIMEZONE` (mặc định `Asia/Ho_Chi_Minh`, sử dụng `ZoneInfo`)
+  - `EOD_HOUR` (mặc định `15`) và `EOD_MINUTE` (mặc định `5`)
+  - `OPEN_HOUR` (mặc định `9`) và `CLOSE_HOUR` (mặc định `15`)
 * Intraday 15’: mở 09:00, đóng 15:00
 
 ## Chạy bằng Docker
