@@ -1585,8 +1585,6 @@ def backtest_engine_v12(
 # ===================================================================
 # 3. TẢI DỮ LIỆU
 # ===================================================================
-DATA_FILE_PATH = r"E:\Document\Tao\Study\Data Science Talent Competition 2025\problem2\solution\data-v2.parquet"
-
 if not os.path.exists(DATA_FILE_PATH):
     print(f"Lỗi: Không tìm thấy file dữ liệu '{DATA_FILE_PATH}'.")
 else:
