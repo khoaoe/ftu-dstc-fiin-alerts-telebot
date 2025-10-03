@@ -3,20 +3,28 @@ from __future__ import annotations
 import importlib
 from typing import Optional
 
-# --- Robust import: ưu tiên v12 ở repo root; nếu không có thì thử round_2.v12 ---
+# --- Robust import: uu tien v12 o repo root; neu khong co thi thu round_2.v12 ---
+_import_errors = []
+
 def _try_import(name: str):
     try:
         return importlib.import_module(name)
-    except Exception:
+    except Exception as exc:
+        _import_errors.append((name, exc))
         return None
 
-_v12 = _try_import("v12") 
+_v12 = _try_import("v12") or _try_import("round_2.v12")
 
 def _require_v12():
     if not _v12:
+        context = ""
+        if _import_errors:
+            details = "; ".join(f"{name}: {exc}" for name, exc in _import_errors)
+            context = f" (import detail: {details})"
         raise ImportError(
-            "[v12_adapter] Không tìm thấy module 'v12' (root) hoặc 'round_2.v12'. "
-            "Hãy đặt v12.py vào repo root hoặc thêm round_2/__init__.py để import."
+            "[v12_adapter] Khong tim thay module 'v12' (root) hoac 'round_2.v12'. "
+            "Hay dat v12.py vao repo root hoac them round_2/__init__.py de import."
+            + context
         )
     miss = [x for x in (
         "precompute_technical_indicators_vectorized",
@@ -24,8 +32,8 @@ def _require_v12():
     ) if not hasattr(_v12, x)]
     if miss:
         raise AttributeError(
-            f"[v12_adapter] Thiếu hàm trong v12: {', '.join(miss)}. "
-            "Hãy đảm bảo v12.py có đúng các hàm API."
+            f"[v12_adapter] Thieu ham trong v12: {', '.join(miss)}. "
+            "Hay dam bao v12.py co du day cac ham API."
         )
 
 # ============== API CHUẨN DÙNG V12 ==============
