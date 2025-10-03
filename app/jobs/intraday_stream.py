@@ -8,9 +8,9 @@ from ..notifier import TelegramNotifier
 from ..strategy_adapter import early_signal_from_15m_bar
 from ..utils.trading_calendar import is_trading_day
 from ..state import load_state, save_state
+from ..formatters.vi_alerts import build_buy_alert_vi
 
 _event = None
-_tg = TelegramNotifier()
 _state = load_state()
 _last_alert = _state.get("last_alert_15m", {})  # ticker -> last_bar_ts
 
@@ -24,16 +24,17 @@ def _on_bar_15m(data: BarDataUpdate):
         if _last_alert.get(tk) == prev["timestamp"]:
             continue
         if early_signal_from_15m_bar(prev):
-            try:
-                px = float(prev.get("close", 0.0))
-                op = float(prev.get("open", 0.0))
-                chg = (px / op - 1) * 100 if op else 0.0
-                vol = int(prev.get("volume", 0))
-                _tg.send(f"<b>[15’ Early]</b> {tk} | {px:.2f} ({chg:+.2f}%) | vol {vol:,} @ {prev['timestamp']}")
-            finally:
-                _last_alert[tk] = prev["timestamp"]
-                _state["last_alert_15m"] = _last_alert
-                save_state(_state)
+            entry = float(prev.get("entry") or prev.get("close") or 0.0)
+            tp = float(prev.get("tp") or entry)
+            sl = float(prev.get("sl") or entry)
+            regime = prev.get("regime", "bull")
+            TelegramNotifier.send(
+                build_buy_alert_vi(tk, entry, tp, sl, regime),
+                parse_mode="HTML"
+            )
+            _last_alert[tk] = prev["timestamp"]
+            _state["last_alert_15m"] = _last_alert
+            save_state(_state)
 
 
 def start_intraday_stream(block: bool = False):

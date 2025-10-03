@@ -10,7 +10,6 @@ from ..utils.trading_calendar import is_trading_day
 from ..state import load_state, save_state
 
 _event_day = None
-_tg = TelegramNotifier()
 _state = load_state()
 _last_ts_day = _state.get("last_ts_day", None)
 
@@ -27,7 +26,7 @@ def _on_bar_1d(data: BarDataUpdate):
 
     picks = apply_v12_on_last_day(feat)  # apply on running day bar
     if picks:
-        _tg.send("<b>[Day-Running V12]</b> " + ", ".join(picks))
+        TelegramNotifier.send("<b>[Day-Running V12]</b> " + ", ".join(picks), parse_mode="HTML")
     _last_ts_day = last_ts
     _state["last_ts_day"] = _last_ts_day
     save_state(_state)

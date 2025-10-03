@@ -3,6 +3,50 @@ from __future__ import annotations
 import importlib
 from typing import Optional
 import pandas as pd
+import numpy as np
+
+# ====== Helpers tính chỉ báo kỹ thuật (không phụ thuộc thư viện ngoài) ======
+def _sma(s: pd.Series, n: int) -> pd.Series:
+    return s.rolling(n, min_periods=n).mean()
+
+def _ema(s: pd.Series, n: int) -> pd.Series:
+    return s.ewm(span=n, adjust=False, min_periods=n).mean()
+
+def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
+    delta = close.diff()
+    up = delta.clip(lower=0.0)
+    down = (-delta).clip(lower=0.0)
+    roll_up = up.ewm(alpha=1/n, adjust=False, min_periods=n).mean()
+    roll_down = down.ewm(alpha=1/n, adjust=False, min_periods=n).mean()
+    rs = roll_up / (roll_down.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def _macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series]:
+    ema_fast = _ema(close, fast)
+    ema_slow = _ema(close, slow)
+    macd = ema_fast - ema_slow
+    macd_signal = macd.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    return macd, macd_signal
+
+def _bb_width(close: pd.Series, n: int = 20, nstd: float = 2.0) -> pd.Series:
+    ma = close.rolling(n, min_periods=n).mean()
+    sd = close.rolling(n, min_periods=n).std(ddof=0)
+    upper = ma + nstd * sd
+    lower = ma - nstd * sd
+    width = (upper - lower) / ma
+    return width
+
+def _atr(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 14) -> pd.Series:
+    prev_close = close.shift(1)
+    tr = np.maximum.reduce([
+        (high - low).abs().values,
+        (high - prev_close).abs().values,
+        (low - prev_close).abs().values
+    ])
+    tr = pd.Series(tr, index=close.index)
+    atr = tr.rolling(n, min_periods=n).mean()
+    return atr
 
 # --- Robust import: uu tien v12 o repo root; neu khong co thi thu round_2.v12 ---
 _import_errors = []
@@ -110,16 +154,11 @@ def _ensure_market_close(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- TH3: DataFrame 1 cấp chỉ số → group theo cột date nếu có ---
     if not is_mi:
-        # Nếu chưa có 'date' thì suy ra từ 'timestamp' hoặc 'time'
+        # Chuẩn hóa 'date' từ timestamp/time nếu cần
         if 'date' not in out.columns:
-            ts_col = None
-            for c in ['timestamp', 'time', 'Date', 'datetime', 'Datetime']:
-                if c in out.columns:
-                    ts_col = c
-                    break
+            ts_col = next((c for c in ['timestamp', 'time', 'Date', 'datetime', 'Datetime'] if c in out.columns), None)
             if ts_col is not None:
                 out['date'] = pd.to_datetime(out[ts_col]).dt.date
-
         if 'date' in out.columns:
             daily = out.groupby('date')[close_col].mean()
             out['market_close'] = out['date'].map(daily)
@@ -130,15 +169,57 @@ def _ensure_market_close(df: pd.DataFrame) -> pd.DataFrame:
         "[v12_adapter] Không thể tạo 'market_close'. "
         "Yêu cầu: DataFrame có MultiIndex (ngày, mã) hoặc có cột 'date', và có cột giá đóng cửa."
     )
+    
 
-def compute_features_v12(df_hist):
+def compute_features_v12(df_hist: pd.DataFrame) -> pd.DataFrame:
     """
-    Tính toàn bộ chỉ báo/feature V12 trên HISTORICAL (vd 260 phiên).
-    Trả về DataFrame 'feat' (cùng số hàng), có đủ cột V12 yêu cầu.
+    Sinh đầy đủ cột kỹ thuật mà chiến lược V12 yêu cầu:
+    ['market_MA200','market_rsi','sma_50','sma_200','rsi_14','volume_spike','macd','macd_signal','boll_width','atr_14']
+    - Tự tạo 'date' từ ['timestamp'/'time'/...] nếu thiếu.
+    - Tính theo từng 'ticker', sau đó merge 'market_*' từ VNINDEX theo 'date'.
     """
-    _require_v12()
-    df_hist = _ensure_market_close(df_hist) 
-    return _v12.precompute_technical_indicators_vectorized(df_hist)
+    if df_hist is None or len(df_hist) == 0:
+        return df_hist
+
+    df = df_hist.copy()
+    # Bắt buộc có 'date' để group/merge
+    if 'date' not in df.columns:
+        ts_col = next((c for c in ['timestamp', 'time', 'Date', 'datetime', 'Datetime'] if c in df.columns), None)
+        if ts_col is None:
+            raise KeyError("[v12_adapter] Thiếu cột thời gian ('timestamp'/'time') để tạo 'date'.")
+        df['date'] = pd.to_datetime(df[ts_col]).dt.date
+
+    # Sắp xếp và tính theo từng mã
+    df = df.sort_values(['ticker', 'date'])
+    def _per_ticker(g: pd.DataFrame) -> pd.DataFrame:
+        out = g.copy()
+        out['sma_50']  = _sma(out['close'], 50)
+        out['sma_200'] = _sma(out['close'], 200)
+        out['rsi_14']  = _rsi(out['close'], 14)
+        macd, macd_signal = _macd(out['close'], 12, 26, 9)
+        out['macd']        = macd
+        out['macd_signal'] = macd_signal
+        out['boll_width']  = _bb_width(out['close'], 20, 2.0)
+        out['atr_14']      = _atr(out['high'], out['low'], out['close'], 14)
+        # volume_spike = volume / SMA20(volume)
+        vma20 = out['volume'].rolling(20, min_periods=20).mean()
+        out['volume_spike'] = out['volume'] / vma20
+        return out
+
+    df = df.groupby('ticker', group_keys=False).apply(_per_ticker)
+
+    # Market features từ VNINDEX (close)
+    mkt = df[df['ticker'].eq('VNINDEX')][['date', 'close']].rename(columns={'close': 'mkt_close'}).copy()
+    mkt = mkt.sort_values('date').drop_duplicates('date', keep='last')
+    mkt['market_MA200'] = _sma(mkt['mkt_close'], 200)
+    mkt['market_rsi']   = _rsi(mkt['mkt_close'], 14)
+    df = df.merge(mkt[['date', 'market_MA200', 'market_rsi']], on='date', how='left')
+
+    # Loại bỏ phiên chưa đủ dữ liệu cho các chỉ báo bắt buộc
+    req_cols = ['market_MA200','market_rsi','sma_50','sma_200','rsi_14','volume_spike','macd','macd_signal','boll_width','atr_14']
+    df = df.dropna(subset=req_cols)
+    return df
+
 
 def apply_v12_on_last_day(feat_df):
     """
@@ -149,7 +230,10 @@ def apply_v12_on_last_day(feat_df):
     # Hỗ trợ cả 'timestamp' và 'time' (v12.py dùng 'time')
     ts_col = 'timestamp' if 'timestamp' in feat_df.columns else ('time' if 'time' in feat_df.columns else None)
     if ts_col is None:
-        raise KeyError("[v12_adapter] Thiếu cột 'timestamp' hoặc 'time' sau khi tính feature.")
+        # fallback theo 'date' nếu không có timestamp/time
+        ts_col = 'date'
+    if ts_col not in feat_df.columns:
+        raise KeyError("[v12_adapter] Thiếu cột 'timestamp'/'time'/'date' để lấy phiên cuối.")
     last_ts = feat_df[ts_col].max()
     df_last = feat_df[feat_df[ts_col] == last_ts].copy()
     picks = _v12.apply_enhanced_screener_v12(df_last)
