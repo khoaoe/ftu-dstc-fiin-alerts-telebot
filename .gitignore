@@ -17,3 +17,4 @@ repo.txt
 *.pyc
 *.csv
 *.pyc
+/tests
