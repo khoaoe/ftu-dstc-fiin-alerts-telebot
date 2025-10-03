@@ -48,6 +48,24 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 14) -> pd.S
     atr = tr.rolling(n, min_periods=n).mean()
     return atr
 
+
+def _adx(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 14) -> pd.Series:
+    # Wilder's ADX — tối giản cho EOD
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = ((up_move > down_move) & (up_move > 0)).astype(float) * up_move
+    minus_dm = ((down_move > up_move) & (down_move > 0)).astype(float) * down_move
+    tr1 = (high - low).abs()
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low  - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(n, min_periods=n).mean()
+    plus_di  = 100 * (plus_dm.rolling(n, min_periods=n).mean()  / atr)
+    minus_di = 100 * (minus_dm.rolling(n, min_periods=n).mean() / atr)
+    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+    adx = dx.rolling(n, min_periods=n).mean()
+    return adx
+
 # --- Robust import: uu tien v12 o repo root; neu khong co thi thu round_2.v12 ---
 _import_errors = []
 
@@ -208,15 +226,26 @@ def compute_features_v12(df_hist: pd.DataFrame) -> pd.DataFrame:
 
     df = df.groupby('ticker', group_keys=False).apply(_per_ticker)
 
-    # Market features từ VNINDEX (close)
-    mkt = df[df['ticker'].eq('VNINDEX')][['date', 'close']].rename(columns={'close': 'mkt_close'}).copy()
+    # Market features từ VNINDEX (OHLC) — phục vụ filter V12 EOD
+    mkt = df[df['ticker'].eq('VNINDEX')][['date', 'open', 'high', 'low', 'close']].copy()
     mkt = mkt.sort_values('date').drop_duplicates('date', keep='last')
-    mkt['market_MA200'] = _sma(mkt['mkt_close'], 200)
-    mkt['market_rsi']   = _rsi(mkt['mkt_close'], 14)
-    df = df.merge(mkt[['date', 'market_MA200', 'market_rsi']], on='date', how='left')
+    m_close = mkt['close']
+    mkt['market_close']      = m_close
+    mkt['market_MA50']       = _sma(m_close, 50)
+    mkt['market_MA200']      = _sma(m_close, 200)
+    mkt['market_rsi']        = _rsi(m_close, 14)
+    mkt['market_boll_width'] = _bb_width(m_close, 20, 2.0)
+    mkt['market_adx']        = _adx(mkt['high'], mkt['low'], m_close, 14)
+    df = df.merge(
+        mkt[['date','market_close','market_MA50','market_MA200','market_rsi','market_boll_width','market_adx']],
+        on='date', how='left'
+    )
 
     # Loại bỏ phiên chưa đủ dữ liệu cho các chỉ báo bắt buộc
-    req_cols = ['market_MA200','market_rsi','sma_50','sma_200','rsi_14','volume_spike','macd','macd_signal','boll_width','atr_14']
+    req_cols = [
+        'market_close','market_MA50','market_MA200','market_rsi','market_boll_width','market_adx',
+        'sma_50','sma_200','rsi_14','volume_spike','macd','macd_signal','boll_width','atr_14'
+    ]
     df = df.dropna(subset=req_cols)
     return df
 

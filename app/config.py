@@ -18,12 +18,14 @@ class Settings:
         for s in os.getenv("EXCLUDE_TICKERS", "VNINDEX").split(",")
         if s.strip()
     )
-    tz: str        = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
+    tz: str         = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
     # Scheduling (configurable):
-    eod_hour: int   = int(os.getenv("EOD_HOUR", "15"))
-    eod_minute: int = int(os.getenv("EOD_MINUTE", "5"))
-    open_hour: int  = int(os.getenv("OPEN_HOUR", "9"))
-    close_hour: int = int(os.getenv("CLOSE_HOUR", "15"))
+    eod_hour: int    = int(os.getenv("EOD_HOUR", "15"))
+    eod_minute: int  = int(os.getenv("EOD_MINUTE", "5"))
+    # EOD-only: intraday OFF by default
+    use_intraday: bool = bool(int(os.getenv("USE_INTRADAY", "0")))
+    open_hour: int   = int(os.getenv("OPEN_HOUR", "9"))
+    close_hour: int  = int(os.getenv("CLOSE_HOUR", "15"))
 
     def __post_init__(self):
         # Luôn thêm VNINDEX để tính market features (MA/RSI/ADX/BB width) cho V12

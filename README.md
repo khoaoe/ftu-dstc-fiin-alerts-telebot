@@ -1,6 +1,6 @@
 # FinLab Signal Bot
 
-Bot Telegram gửi cảnh báo tín hiệu từ chiến lược V12 trên dữ liệu FiinQuantX – gồm EOD (snapshot) và 15’ realtime (callback).\
+Bot Telegram gửi cảnh báo tín hiệu từ chiến lược V12 trên dữ liệu FiinQuantX – **mặc định EOD-only** (snapshot). 15’ realtime (callback) là **tùy chọn**, tắt theo mặc định.\
 Yêu cầu Python 3.11+.
 
 ## Cài đặt (local)
@@ -31,7 +31,7 @@ bash scripts/run_local.sh
   - `TIMEZONE` (mặc định `Asia/Ho_Chi_Minh`, sử dụng `ZoneInfo`)
   - `EOD_HOUR` (mặc định `15`) và `EOD_MINUTE` (mặc định `5`)
   - `OPEN_HOUR` (mặc định `9`) và `CLOSE_HOUR` (mặc định `15`)
-* Intraday 15’: mở 09:00, đóng 15:00
+* Intraday 15’: mở 09:00, đóng 15:00 (**chỉ khi** `USE_INTRADAY=1`)
 
 ## Chạy bằng Docker
 
@@ -44,5 +44,6 @@ docker run --env-file .env --name finlab-bot finlab-signal-bot
 
 ## Ghi chú
 
-* EOD là confirm; 15’ là early signal. Tôn trọng hạn mức Telegram nếu cần gom batch.
+* EOD là confirm; 15’ là early signal (tắt mặc định). Tôn trọng hạn mức Telegram nếu cần gom batch.
+* Bật intraday nếu cần: thêm `USE_INTRADAY=1` trong `.env`.
 
