@@ -16,3 +16,4 @@ repo.txt
 .augment/rules/byterover-rules.md
 *.pyc
 *.csv
+*.pyc

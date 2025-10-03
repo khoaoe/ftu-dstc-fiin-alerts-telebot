@@ -25,4 +25,9 @@ class Settings:
     open_hour: int  = int(os.getenv("OPEN_HOUR", "9"))
     close_hour: int = int(os.getenv("CLOSE_HOUR", "15"))
 
+    def __post_init__(self):
+        # Luôn thêm VNINDEX để tính market features (MA/RSI/ADX/BB width) cho V12
+        if "VNINDEX" not in self.tickers:
+            self.tickers = tuple(list(self.tickers) + ["VNINDEX"])
+
 CFG = Settings()

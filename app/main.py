@@ -6,10 +6,25 @@ from .config import CFG
 from .jobs.eod_scan import run_eod_scan
 from .jobs.intraday_stream import start_intraday_stream, stop_intraday_stream
 from .jobs.intraday_day_stream import start_intraday_day_stream, stop_intraday_day_stream
-
+from .jobs.intraday_day_stream import start_intraday_day_stream, stop_intraday_day_stream
+from .notifier import TelegramNotifier
+from .fiin_client import get_client
 
 async def main():
     sch = AsyncIOScheduler(timezone=ZoneInfo(CFG.tz))
+    # Boot sanity check & ping
+    try:
+        _ = get_client()
+        TelegramNotifier.send(
+            f"✅ Bot started (tz={CFG.tz}) • EOD {CFG.eod_hour:02d}:{CFG.eod_minute:02d} • 15’ {CFG.open_hour:02d}:00→{CFG.close_hour:02d}:00",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        try:
+            TelegramNotifier.send(f"⚠️ Bot started nhưng lỗi đăng nhập FiinQuantX: {e}", parse_mode="HTML")
+        except Exception:
+            pass
+        
     # EOD daily (confirm-on-close)
     sch.add_job(
         run_eod_scan,

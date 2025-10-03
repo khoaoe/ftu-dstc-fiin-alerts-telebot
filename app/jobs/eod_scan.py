@@ -5,6 +5,8 @@ from ..notifier import TelegramNotifier
 from ..strategy_adapter import compute_features_v12, apply_v12_on_last_day
 from ..formatters.vi_alerts import build_eod_header_vi, build_buy_alert_vi, build_no_pick_vi
 
+import pandas as pd
+
 
 def run_eod_scan():
     client = get_client()
@@ -16,15 +18,21 @@ def run_eod_scan():
         by='1d',
         period=260
     ).get_data()
-
+    
     feat = compute_features_v12(data)
-    ts_col = 'timestamp' if 'timestamp' in feat.columns else ('time' if 'time' in feat.columns else None)
-    if not ts_col:
+
+    # Ưu tiên 'date' (adapter đã chuẩn hoá). Fallback sang 'time'/'timestamp' nếu cần.
+    if 'date' in feat.columns:
+        ts_series = pd.to_datetime(feat['date'])
+    elif 'time' in feat.columns:
+        ts_series = pd.to_datetime(feat['time'])
+    elif 'timestamp' in feat.columns:
+        ts_series = pd.to_datetime(feat['timestamp'])
+    else:
         TelegramNotifier.send(build_no_pick_vi('EOD'), parse_mode="HTML")
         return
-
-    last_ts = feat[ts_col].max()
-    feat_last = feat[feat[ts_col] == last_ts].copy()
+    last_ts = ts_series.max()
+    feat_last = feat[ts_series == last_ts].copy()
 
     picks = apply_v12_on_last_day(feat)
     if getattr(CFG, "exclude_tickers", None):
@@ -73,7 +81,8 @@ def run_eod_scan():
             match = feat_last[feat_last[ticker_col].astype(str).str.upper() == ticker.upper()]
             if not match.empty:
                 row = match.iloc[0]
-                entry_val = row.get('close') or row.get('close_adj') or 0.0
+                # Ưu tiên giá đã điều chỉnh
+                entry_val = row.get('close_adj') or row.get('close') or 0.0
                 atr_val = row.get('atr_14') or 0.0
                 try:
                     entry = float(entry_val)
@@ -91,4 +100,5 @@ def run_eod_scan():
                     sl = entry
         blocks.append(build_buy_alert_vi(ticker, entry, tp, sl, regime_label))
 
-    TelegramNotifier.send("\n\n".join(blocks), parse_mode="HTML")
+    # Gửi theo từng đoạn để an toàn giới hạn 4096 ký tự của Telegram
+    TelegramNotifier().send_chunks("\n\n".join(blocks), parse_mode="HTML")

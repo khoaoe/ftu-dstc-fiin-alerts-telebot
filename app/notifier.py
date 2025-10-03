@@ -37,6 +37,22 @@ class TelegramNotifier:
     def send_message(self, text: str, parse_mode: str = "HTML", retries: int = 3, backoff: float = 1.0):
         return self._send(text=text, parse_mode=parse_mode, retries=retries, backoff=backoff)
 
+    @staticmethod
+    def _split_text(text: str, limit: int = 3500) -> list[str]:
+        if len(text) <= limit:
+            return [text]
+        parts, buf, size = [], [], 0
+        for line in text.splitlines():
+            if size + len(line) + 1 > limit and buf:
+                parts.append("\n".join(buf)); buf, size = [], 0
+            buf.append(line); size += len(line) + 1
+        if buf: parts.append("\n".join(buf))
+        return parts
+
+    def send_chunks(self, text: str, parse_mode: str = "HTML"):
+        for part in self._split_text(text):
+            self._send(part, parse_mode=parse_mode)
+            
     @classmethod
     def send(cls, text: str, parse_mode: str = "HTML"):
         """
@@ -47,3 +63,4 @@ class TelegramNotifier:
         - Co backoff 429 dua tren Retry-After (neu da code roi thi giu nguyen).
         """
         return cls()._send(text=text, parse_mode=parse_mode)
+    
