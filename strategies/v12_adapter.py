@@ -2,6 +2,7 @@
 from __future__ import annotations
 import importlib
 from typing import Optional
+import pandas as pd
 
 # --- Robust import: uu tien v12 o repo root; neu khong co thi thu round_2.v12 ---
 _import_errors = []
@@ -108,10 +109,21 @@ def _ensure_market_close(df: pd.DataFrame) -> pd.DataFrame:
         return out
 
     # --- TH3: DataFrame 1 cấp chỉ số → group theo cột date nếu có ---
-    if (not is_mi) and ('date' in out.columns):
-        daily = out.groupby('date')[close_col].mean()
-        out['market_close'] = out['date'].map(daily)
-        return out
+    if not is_mi:
+        # Nếu chưa có 'date' thì suy ra từ 'timestamp' hoặc 'time'
+        if 'date' not in out.columns:
+            ts_col = None
+            for c in ['timestamp', 'time', 'Date', 'datetime', 'Datetime']:
+                if c in out.columns:
+                    ts_col = c
+                    break
+            if ts_col is not None:
+                out['date'] = pd.to_datetime(out[ts_col]).dt.date
+
+        if 'date' in out.columns:
+            daily = out.groupby('date')[close_col].mean()
+            out['market_close'] = out['date'].map(daily)
+            return out
 
     # Không thể suy ra benchmark → để nổ sớm, kèm gợi ý cấu trúc
     raise KeyError(
@@ -134,10 +146,12 @@ def apply_v12_on_last_day(feat_df):
     feat_df: DataFrame đã qua compute_features_v12(...)
     """
     _require_v12()
-    if "timestamp" not in feat_df.columns:
-        raise KeyError("[v12_adapter] Thiếu cột 'timestamp' sau khi tính feature.")
-    last_ts = feat_df["timestamp"].max()
-    df_last = feat_df[feat_df["timestamp"] == last_ts].copy()
+    # Hỗ trợ cả 'timestamp' và 'time' (v12.py dùng 'time')
+    ts_col = 'timestamp' if 'timestamp' in feat_df.columns else ('time' if 'time' in feat_df.columns else None)
+    if ts_col is None:
+        raise KeyError("[v12_adapter] Thiếu cột 'timestamp' hoặc 'time' sau khi tính feature.")
+    last_ts = feat_df[ts_col].max()
+    df_last = feat_df[feat_df[ts_col] == last_ts].copy()
     picks = _v12.apply_enhanced_screener_v12(df_last)
     return list(picks)
 
