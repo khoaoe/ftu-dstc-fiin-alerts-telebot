@@ -1,4 +1,4 @@
-# 🤖 FinLab - Telegram EOD Alert Bot
+# 🤖 FinLab - EOD Trade Signal Alert TelegramBot
 
 > 🌟 Biến chiến lược V12 thành **hệ thống cảnh báo MUA/BÁN** tự động qua **Telegram**, chạy theo **EOD (End-of-Day)**.
 
@@ -194,4 +194,4 @@ python app/jobs/alerts_on_date.py --date 2025-07-30
 
 ---
 
-> 🧭 *FiinQuant V12 Bot – chính xác, gọn
+> 🤖 FinLab - EOD Trade Signal Alert TelegramBot
