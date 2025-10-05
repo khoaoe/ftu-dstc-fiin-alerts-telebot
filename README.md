@@ -1,121 +1,103 @@
-# FinLab — Telegram EOD Alert Bot
+# 🤖 FinLab - Telegram EOD Alert Bot
 
-> Biến chiến lược V12 thành **hệ thống cảnh báo MUA/BÁN** tự động qua Telegram, chạy theo **EOD (End-of-Day)**.
-
----
-
-## 1) Tính năng chính
-
-* **Cảnh báo MUA (EOD):** lọc cổ phiếu theo **screener V12** đúng ngày giao dịch (chỉ số thị trường, khối lượng, động lượng, MACD…).
-* **Cảnh báo BÁN (EOD):** áp logic thoát lệnh **đồng nhất với backtest V12**:
-  TP/SL, trailing stop, chốt lời một phần, tối thiểu số ngày nắm giữ (T+2).
-* **Gửi Telegram**: thông điệp HTML, định dạng rõ ràng; có tiêu đề phiên, bối cảnh thị trường, R/R, TP/SL tham khảo.
-* **Replay theo ngày**: chỉ định `DATE` để “phát lại” cảnh báo MUA/BÁN như tại ngày đó (phục vụ kiểm thử).
-* **Backtest có sẵn**: chạy nhanh với `v12.py` để đối chiếu hiệu năng chiến lược.
-
-> **Hiện trạng**: bản triển khai này **EOD-only** (không bật intraday/15’). Có thể mở rộng intraday sau.
+> 🌟 Biến chiến lược V12 thành **hệ thống cảnh báo MUA/BÁN** tự động qua **Telegram**, chạy theo **EOD (End-of-Day)**.
 
 ---
 
-## 2) Kiến trúc (rút gọn)
+## 1️⃣ 🚀 Tính năng chính
+
+* 🟢 **Cảnh báo MUA (EOD):** lọc cổ phiếu theo **screener V12** đúng ngày giao dịch.
+* 🔴 **Cảnh báo BÁN (EOD):** áp logic thoát lệnh **đồng nhất với backtest V12**: TP/SL, trailing stop, partial take-profit, tối thiểu **T+2**.
+* 💬 **Gửi Telegram:** thông điệp HTML đẹp, rõ, có **R/R**, **TP/SL**, **market regime**.
+* ⏳ **Replay:** chỉ định `DATE` để chạy lại cảnh báo MUA/BÁN đúng như phiên đó.
+* 📊 **Backtest sẵn:** dùng `v12.py` để kiểm chứng hiệu năng chiến lược.
+
+---
+
+## 2️⃣ 🧩 Kiến trúc (rút gọn)
 
 ```
 repo/
 ├─ app/
 │  ├─ jobs/
-│  │  ├─ eod_scan.py           # Quét EOD, gửi cảnh báo MUA trong ngày
-│  │  └─ alerts_on_date.py     # Replay cảnh báo theo một DATE (MUA/BÁN)
-│  ├─ formatters/vi_alerts.py  # Hàm dựng nội dung tin nhắn (HTML)
-│  ├─ notifier.py              # TelegramNotifier (gửi message)
-│  ├─ state.py                 # Lưu/đọc trạng thái các vị thế đang mở (state.json)
-│  └─ fiin_client.py           # Kết nối FiinQuantX hoặc đọc file EOD
-├─ data/                       # (tuỳ chọn) EOD .parquet/.csv nếu không gọi API
+│  │  ├─ eod_scan.py           # Quét EOD, gửi cảnh báo MUA
+│  │  └─ alerts_on_date.py     # Replay cảnh báo theo DATE (MUA/BÁN)
+│  ├─ formatters/vi_alerts.py  # Định dạng tin nhắn HTML
+│  ├─ notifier.py              # Gửi Telegram
+│  ├─ state.py                 # Quản lý file state.json (vị thế mở)
+│  └─ fiin_client.py           # Kết nối FiinQuantX / đọc dữ liệu file
+├─ data/                       # (tuỳ chọn) File .csv/.parquet EOD
 ├─ v12.py                      # Chiến lược V12 + backtest engine
-├─ requirements.txt
 └─ README.md
 ```
 
-> Tên file có thể khác nhẹ tùy repo của bạn, nhưng **vai trò các thành phần** vẫn như trên.
-
 ---
 
-## 3) Cách cài đặt
+## 3️⃣ ⚙️ Cài đặt nhanh
 
-### 3.1. Yêu cầu
+### 🧰 Yêu cầu
 
-* Python **3.10+** (khuyến nghị)
-* Môi trường 64-bit, pip/venv sẵn sàng
+* Python **3.10+**
+* Pip/venv đầy đủ
 
-### 3.2. Cài thư viện
+### 📦 Cài thư viện
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3.3. Biến môi trường (ENV)
-
-Tạo file `.env` (hoặc export trực tiếp) với các khóa sau:
+### ⚙️ Biến môi trường `.env`
 
 ```dotenv
-# FiinQuantX (nếu dùng API trực tiếp)
-FIIN_USER=your_email_or_user
+# 🔑 FiinQuantX (nếu dùng API)
+FIIN_USER=your_email
 FIIN_PASS=your_password
 
-# Telegram
-BOT_TOKEN=1234567890:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-CHAT_ID=-100xxxxxxxxxx              # Chat/group/channel id
-THREAD_ID=0                         # (tuỳ chọn) id topic/thread
+# 💬 Telegram
+BOT_TOKEN=1234567890:xxxx
+CHAT_ID=-100xxxxxxxxx
+THREAD_ID=0  # tuỳ chọn
 
-# Dữ liệu EOD từ file (nếu KHÔNG gọi API)
+# 💾 Dữ liệu EOD từ file (nếu KHÔNG dùng API)
 DATA_FILE_PATH=/path/to/eod.parquet
 ```
 
-> **Chỉ cần một nguồn dữ liệu**: hoặc `FIIN_USER/FIIN_PASS` (API), **hoặc** `DATA_FILE_PATH` (file EOD).
+> 🔔 Chỉ cần **một nguồn dữ liệu**: API **hoặc** file data chuẩn bị trước.
 
 ---
 
-## 4) Chạy nhanh
+## 4️⃣ 🧠 Cách sử dụng
 
-### 4.1. Backtest chiến lược (đối chiếu)
+* **Backtest chiến lược:**
 
-```bash
-python v12.py
-```
+  ```bash
+  python v12.py
+  ```
+* **Quét & gửi cảnh báo EOD hôm nay:**
 
-Sinh các file log như `portfolio_log.csv`, `trades_log.csv`, `drawdown_log.csv` để tham khảo hiệu năng.
+  ```bash
+  python app/jobs/eod_scan.py
+  ```
+* **Replay cảnh báo theo ngày:**
 
-### 4.2. Quét & gửi cảnh báo **EOD hôm nay**
-
-```bash
-python app/jobs/eod_scan.py
-```
-
-* Lấy dữ liệu EOD mới nhất → tính feature → lọc **picks** theo V12 → **gửi Telegram** 1 tin header (bối cảnh thị trường) + N tin MUA.
-
-### 4.3. Replay cảnh báo theo **một ngày bất kỳ**
-
-```bash
-# DATE dạng YYYY-MM-DD; nếu bỏ qua --date, script dùng DEFAULT_DATE trong file
-python app/jobs/alerts_on_date.py --date 2025-07-30
-```
-
-* **MUA**: chạy screener đúng ngày `DATE`.
-* **BÁN**: xét các vị thế đã mua **trước `DATE`** từ `state.json`, áp logic thoát V12 (TP/SL, trailing, partial).
+  ```bash
+  python app/jobs/alerts_on_date.py --date 2025-07-30
+  ```
 
 ---
 
-## 5) Định dạng tin nhắn Telegram (ví dụ)
+## 5️⃣ ✉️ Mẫu tin nhắn Telegram
 
 **MUA**
 
 ```
 🟢
 <b>[2025-07-30] Cảnh báo MUA: CTG</b>
-• Regime thị trường: <b>bull</b>
-• Giá vào lệnh (tham khảo): <b>39.800</b>
-• Chốt lời (TP): 41.500  (≈ +4.3%)
-• Cắt lỗ (SL): 38.200  (≈ -4.0%)
-• Tỷ lệ R/R: <b>1.08</b>
+• Regime: <b>bull</b>
+• Entry: <b>39.800</b>
+• TP: 41.500  (≈ +4.3%)
+• SL: 38.200  (≈ -4.0%)
+• R/R: <b>1.08</b>
 ```
 
 **BÁN**
@@ -123,44 +105,93 @@ python app/jobs/alerts_on_date.py --date 2025-07-30
 ```
 🔴
 <b>[2025-08-06] Cảnh báo BÁN: CTG</b>
-• Lý do: <b>BÁN CHỐT LỜ (MỘT PHẦN)</b>
-• Giá thoát (tham khảo): <b>41.600</b>  (≈ +4.5%)
-• Giá vào lệnh: 39.800
-• Trailing SL hiện tại: 40.000
-• Tỷ lệ R/R (ước lượng): <b>1.10</b>
+• Lý do: <b>TP partial / SL / trailing</b>
+• Giá thoát: <b>41.600</b> (≈ +4.5%)
+• Entry: 39.800 | Trailing SL: 40.000
 ```
 
-> Nội dung HTML đã được escape; Telegram hiển thị đậm/emoji chuẩn.
+---
+
+## 6️⃣ 📊 Tóm tắt chiến lược V12
+
+* 📈 **Regime thị trường** (VNINDEX): xác định bull / sideway / bear qua `market_*` (MA50/200, RSI, ADX, BollWidth).
+* 🎯 **Screener:** ưu tiên động lượng, volume spike, sức mạnh tương đối và vị trí kỹ thuật.
+* 🧮 **Quản trị lệnh:** entry = close EOD; TP/SL theo ATR, trailing stop từ highest, partial take-profit lần 1, giữ tối thiểu T+2.
 
 ---
 
-## 6) Tóm tắt chiến lược V12 (EOD screener & exit)
+## 7️⃣ ⚙️ Cấu hình & Tuỳ biến
 
-* **Bối cảnh thị trường** (VN-Index): dùng các biến **`market_*`** (MA50/MA200, RSI, ADX, Bollinger width) để xác định **bull/sideway/bear**.
+* 🧾 **Danh mục mã giao dịch**: chỉnh trong `config.py` (ví dụ `CFG.tickers`) hoặc trong nơi fetch dữ liệu.
+* 🌐 **Nguồn dữ liệu**:
 
-  * **Bear**: **không vào lệnh**.
-  * **Bull**: ưu tiên **động lượng + sức mạnh tương đối**.
-  * **Sideway**: ưu tiên **breakout nhẹ + volume spike**.
+  * ☁️ **FiinQuantX API** — khuyến nghị dùng trong môi trường vận hành thực tế.
+  * 💾 **File EOD (.parquet / .csv)** — dùng cho kiểm thử hoặc replay offline.
+* ⚙️ **Tham số chiến lược (Strategy Params)**:
 
-* **Điều kiện chọn lọc tiêu biểu** (rút gọn):
+  * `atr_multiplier`: hệ số ATR để tính TP/SL (mặc định ~1.5–2.0)
+  * `trailing_stop_pct`: % trailing stop (mặc định 5%)
+  * `partial_profit_pct`: tỉ lệ chốt lời một phần (mặc định 40%)
+  * `min_holding_days`: số ngày nắm giữ tối thiểu (T+2/T+3)
+* 💬 **Telegram Config**:
 
-  * **Bull**: `close_adj > SMA200 > ...`, `RSI 50–80`, `volume_spike > 0.3`, `relative_strength > 1.05`, `short_momentum > 0.01`, `close_adj > SMA5`.
-  * **Sideway**: `RSI ~ 48–55`, `boll_width < 0.3`, `macd_histogram > 0`, `volume_spike ≥ 1.0`, `ATR/price > 0.02`, `close_adj ≥ 0.95×SMA50/200`, ưu tiên **độ gần dải Bollinger/SMA**.
+  * `BOT_TOKEN`, `CHAT_ID`, `THREAD_ID` đặt trong `.env`
+  * Có thể gửi tới nhóm, channel hoặc topic riêng.
+* 📂 **Lưu trạng thái (state)**:
 
-* **Xếp hạng `score`** theo bối cảnh (tổ hợp các thước đo ở trên) → lấy **top N** làm watchlist.
+  * File `state.json` chứa các vị thế đang mở (mã, ngày mua, giá, TP/SL…)
+  * Được cập nhật tự động sau mỗi phiên `alerts_on_date.py`
 
-* **Quản trị lệnh (thoát)**:
-
-  * **TP/SL cố định theo ATR** từ giá vào (entry=close EOD), kiểm tra gap/open và nội phiên (EOD giả lập).
-  * **Trailing stop** cập nhật theo **highest**.
-  * **Partial take-profit** (bán một phần ở TP lần 1), nâng TP/SL phù hợp.
-  * **Ràng buộc T+2** (nắm giữ tối thiểu trước khi bán).
-
-> Logic trên bám đúng phần **backtest/engine** trong `v12.py`. Tham số mặc định thường thấy: `atr_multiplier≈1.5–2.0`, `trailing_stop_pct≈5%`, `partial_profit_pct≈40%`, `min_holding_days≈2–3`.
+💡 *Tip:* Có thể duy trì nhiều `state_*.json` để tách danh mục theo chiến lược hoặc tài khoản.
 
 ---
 
-## 7) Cấu hình & tuỳ biến
+## 8️⃣ 🧩 Lỗi & Khắc phục
 
-* **Danh mục mã**: chỉnh trong config (ví dụ `CFG.tickers`) hoặc ở nơi fetch dữ liệu.
-* **Nguồn dữ li
+| ⚠️ Tình huống                            | 💡 Nguyên nhân                                | 🔧 Cách xử lý                                                |
+| ---------------------------------------- | --------------------------------------------- | ------------------------------------------------------------ |
+| 🧱 Thiếu cột `market_MA200`, `rsi_14`, … | Feature chưa tính đủ                          | Rà lại bước `compute_features_v12` hoặc cập nhật adapter     |
+| ⏰ `Input data missing 'date' column`     | Dữ liệu không có trường thời gian             | Đổi tên cột `time` → `date` hoặc chuẩn hóa kiểu `datetime64` |
+| 📉 Không có tín hiệu MUA                 | Thị trường `bear` hoặc điều kiện lọc quá chặt | Kiểm tra chế độ thị trường và tiêu chí lọc trong screener    |
+| 🚫 Bot không gửi tin                     | Lỗi token hoặc chat ID                        | Kiểm tra `BOT_TOKEN`, `CHAT_ID`, và quyền của bot trong nhóm |
+| 🧩 Sai định dạng HTML                    | Escape ký tự đặc biệt chưa đúng               | Dùng hàm `escape()` sẵn trong `vi_alerts.py`                 |
+
+---
+
+## 9️⃣ 🚀 Hướng phát triển
+
+* 🔁 Bổ sung **intraday 15’** (FiinQuant realtime + callback streaming).
+* 📊 Dashboard **Streamlit** hiển thị danh mục, watchlist, R/R.
+* 💼 Quản trị rủi ro nâng cao: position sizing, vault profit, calendar filter.
+* 🧾 Báo cáo ngày tự động: tổng hợp tín hiệu, hiệu suất, sổ lệnh.
+
+---
+
+## 🔟 © Bản quyền & Ghi công
+
+* 🧠 Mã nguồn chiến lược/backtest trong `v12.py` và các job Telegram thuộc nhóm tác giả repo này.
+* 📦 Dữ liệu và SDK từ **FiinQuantX** thuộc bản quyền của **FiinGroup**; người dùng cần tuân thủ điều khoản dịch vụ tương ứng.
+
+---
+
+## 1️⃣1️⃣ 🧭 Lệnh nhanh tham khảo
+
+```bash
+# ⚙️ Tạo môi trường & cài thư viện
+python -m venv .venv
+source .venv/bin/activate   # hoặc .venv\Scripts\activate (Windows)
+pip install -r requirements.txt
+
+# 🧮 Backtest chiến lược
+python v12.py
+
+# 🔔 Quét & gửi cảnh báo EOD hôm nay
+python app/jobs/eod_scan.py
+
+# ⏱️ Replay tín hiệu theo ngày cụ thể
+python app/jobs/alerts_on_date.py --date 2025-07-30
+```
+
+---
+
+> 🧭 *FiinQuant V12 Bot – chính xác, gọn

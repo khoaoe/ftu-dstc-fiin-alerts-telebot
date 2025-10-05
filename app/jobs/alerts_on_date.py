@@ -21,6 +21,10 @@ Chạy:
 """
 
 from __future__ import annotations
+
+import os, sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import os, sys, json, time, math, argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,12 +34,12 @@ import pandas as pd
 import numpy as np
 
 # ---- Import từ repo sẵn có ----
-from app.config import CFG
-from app.fiin_client import get_client
-from app.strategy_adapter import compute_features_v12, apply_v12_on_last_day
-from app.formatters.vi_alerts import build_eod_header_vi, build_buy_alert_vi, fmt_money, fmt_pct, fmt_num
-from app.notifier import TelegramNotifier
-from app.state import load_state, save_state
+from config import CFG
+from fiin_client import get_client
+from strategy_adapter import compute_features_v12, apply_v12_on_last_day
+from formatters.vi_alerts import build_eod_header_vi, build_buy_alert_vi, fmt_money, fmt_pct, fmt_num
+from notifier import TelegramNotifier
+from state import load_state, save_state
 
 # ---- Tham số mặc định (KHỚP VỚI BACKTEST V12) ----
 DEFAULT_DATE = "2025-07-30"  # khi không truyền --date
